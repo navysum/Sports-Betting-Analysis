@@ -409,37 +409,46 @@ def format_backtest(result: dict) -> str:
     if "error" in result:
         return f"❌ {_esc(result['error'])}"
 
-    flat   = result.get("flat", {})
-    value  = result.get("value", {})
-    kelly  = result.get("kelly", {})
-    total  = result.get("total_matches", 0)
+    flat    = result.get("flat", {})
+    value   = result.get("value", {})
+    kelly   = result.get("kelly", {})
+    total   = result.get("total_matches", 0)
+    holdout = result.get("holdout_pct", 30)
 
-    def _pnl_str(pnl: float) -> str:
-        sign = "\\+" if pnl >= 0 else ""
-        return f"{sign}£{pnl:.2f}"
+    def _n(v, decimals=1):
+        """Format a number and escape it for MarkdownV2."""
+        return _esc(f"{v:.{decimals}f}")
 
-    def _roi_str(roi: float) -> str:
-        sign = "\\+" if roi >= 0 else ""
-        return f"{sign}{roi:.1f}%"
+    def _pnl(pnl: float) -> str:
+        sign = "+" if pnl >= 0 else ""
+        return _esc(f"{sign}£{pnl:.2f}")
+
+    def _roi(roi: float) -> str:
+        sign = "+" if roi >= 0 else ""
+        return _esc(f"{sign}{roi:.1f}%")
+
+    def _wr(wr: float) -> str:
+        return _esc(f"{wr:.1f}%")
 
     lines = [
-        "*📊 Historical Backtest \\(FDCO Data\\)*",
-        f"_{total} matches analysed_",
+        "*📊 Backtest \\(most recent {}% of data\\)*".format(holdout),
+        f"_{_esc(str(total))} matches in holdout_",
         "",
-        "*Flat staking \\(£1/match on predicted outcome\\)*",
-        f"  Bets: {flat.get('bets', 0)} \\| Wins: {flat.get('wins', 0)} \\({flat.get('win_rate', 0):.1f}%\\)",
-        f"  P&L: {_pnl_str(flat.get('pnl', 0))} \\| ROI: {_roi_str(flat.get('roi', 0))}",
+        "*Flat — £1 on predicted outcome every match*",
+        f"  Bets: {flat.get('bets', 0)}  \\|  Win rate: {_wr(flat.get('win_rate', 0))}",
+        f"  P&L: {_pnl(flat.get('pnl', 0))}  \\|  ROI: {_roi(flat.get('roi', 0))}",
         "",
-        f"*Value staking \\(edge ≥ {value.get('min_edge_pct', 3)}%, £1/bet\\)*",
-        f"  Bets: {value.get('bets', 0)} \\| Wins: {value.get('wins', 0)} \\({value.get('win_rate', 0):.1f}%\\)",
-        f"  P&L: {_pnl_str(value.get('pnl', 0))} \\| ROI: {_roi_str(value.get('roi', 0))}",
+        f"*Value — bet only when model edge ≥ {_esc(str(value.get('min_edge_pct', 3)))}%*",
+        f"  Bets: {value.get('bets', 0)}  \\|  Win rate: {_wr(value.get('win_rate', 0))}",
+        f"  P&L: {_pnl(value.get('pnl', 0))}  \\|  ROI: {_roi(value.get('roi', 0))}",
         "",
-        f"*Kelly staking \\({int(kelly.get('fraction', 0.25)*100)}% Kelly on value bets\\)*",
-        f"  Bets: {kelly.get('bets', 0)} \\| Wins: {kelly.get('wins', 0)} \\({kelly.get('win_rate', 0):.1f}%\\)",
-        f"  Bankroll: £{kelly.get('starting_bankroll', 100):.0f} → £{kelly.get('final_bankroll', 0):.2f}",
-        f"  Max drawdown: {kelly.get('max_drawdown_pct', 0):.1f}%",
+        f"*Kelly — {int(kelly.get('fraction', 0.25)*100)}% Kelly staking on value bets*",
+        f"  Bets: {kelly.get('bets', 0)}  \\|  Win rate: {_wr(kelly.get('win_rate', 0))}",
+        f"  Bankroll: {_esc('£' + str(int(kelly.get('starting_bankroll', 100))))} → {_pnl(kelly.get('final_bankroll', 0))}",
+        f"  Max drawdown: {_esc(str(kelly.get('max_drawdown_pct', 0)) + '%')}",
         "",
-        "_Backtest uses in\\-sample data — live performance may differ\\._",
+        "_Note: model was trained on older seasons — holdout is partially in\\-sample\\._",
+        "_For fully out\\-of\\-sample results, track live predictions with /accuracy\\._",
     ]
     return "\n".join(lines)
 
