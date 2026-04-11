@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    container_name: soccerbet_backend
+    restart: unless-stopped
+    env_file: ./backend/.env
+    volumes:
+      - backend_data:/app
+    expose:
+      - "8000"
+
+  frontend:
+    build: ./frontend
+    container_name: soccerbet_frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  backend_data:
