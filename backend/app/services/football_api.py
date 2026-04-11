@@ -219,12 +219,20 @@ async def build_team_cache() -> None:
 async def find_team_by_name(name: str) -> Optional[dict]:
     """
     Find a team by name using the local cache (built at startup).
-    Falls back to the API search endpoint if the cache isn't ready yet.
+    Waits up to 45s for the cache if it isn't ready yet.
     """
     from difflib import get_close_matches
 
+    # Wait for cache to be ready (built 15s after startup)
+    if not _team_cache_ready:
+        for _ in range(45):
+            await asyncio.sleep(1)
+            if _team_cache_ready:
+                break
+
     name_lower = name.lower()
-    words = [w for w in name_lower.split() if len(w) >= 4]
+    # Use length >= 3 so short words like "Man", "FC", "AC" are included
+    words = [w for w in name_lower.split() if len(w) >= 3]
 
     if _team_cache:
         # 1. Exact match
@@ -232,9 +240,10 @@ async def find_team_by_name(name: str) -> Optional[dict]:
             return _team_cache[name_lower]
 
         # 2. All significant words present in the key
-        for key, team in _team_cache.items():
-            if words and all(w in key for w in words):
-                return team
+        if words:
+            for key, team in _team_cache.items():
+                if all(w in key for w in words):
+                    return team
 
         # 3. Fuzzy match (difflib)
         candidates = list(_team_cache.keys())
@@ -242,16 +251,4 @@ async def find_team_by_name(name: str) -> Optional[dict]:
         if close:
             return _team_cache[close[0]]
 
-        return None
-
-    # Cache not yet ready — fall back to API, but validate the result
-    try:
-        data = await _get(f"{BASE_URL}/teams", {"name": name, "limit": 10})
-        for team in data.get("teams", []):
-            tname  = (team.get("name")      or "").lower()
-            tshort = (team.get("shortName") or "").lower()
-            if any(w in tname or w in tshort for w in words):
-                return team
-        return None
-    except Exception:
-        return None
+    return None
