@@ -1,43 +1,62 @@
 """
 Train three models: 1X2 result, Over/Under 2.5 goals, BTTS.
 
+Data sources (merged):
+  1. Football-Data.co.uk CSVs  — 3-5 seasons, no API calls, ~3000+ samples
+  2. football-data.org API      — current season, live data
+
+After training, each XGBoost model is isotonic-calibrated on a 20% holdout
+to produce well-calibrated probabilities. Calibrators are saved alongside models.
+
+Accumulated feature cache (data/training_cache.npz) is loaded at startup and
+merged with freshly fetched data, so the dataset grows with every retrain.
+
 Run from backend/ directory:
     python -m ml.train
 
 Models saved to:
-    ml/result_model.joblib
-    ml/goals_model.joblib
-    ml/btts_model.joblib
+    ml/result_model.joblib       ml/result_calibrator.joblib
+    ml/goals_model.joblib        ml/goals_calibrator.joblib
+    ml/btts_model.joblib         ml/btts_calibrator.joblib
     ml/training_log.json
 """
 import asyncio
 import os
 import json
-import time
 import numpy as np
 import joblib
 from xgboost import XGBClassifier
-from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.model_selection import cross_val_score, StratifiedKFold, train_test_split
+from sklearn.calibration import CalibratedClassifierCV
 from ml.features import build_feature_vector, FEATURE_NAMES, N_FEATURES
 
 ML_DIR = os.path.dirname(__file__)
 RESULT_MODEL_PATH  = os.path.join(ML_DIR, "result_model.joblib")
 GOALS_MODEL_PATH   = os.path.join(ML_DIR, "goals_model.joblib")
 BTTS_MODEL_PATH    = os.path.join(ML_DIR, "btts_model.joblib")
+RESULT_CAL_PATH    = os.path.join(ML_DIR, "result_calibrator.joblib")
+GOALS_CAL_PATH     = os.path.join(ML_DIR, "goals_calibrator.joblib")
+BTTS_CAL_PATH      = os.path.join(ML_DIR, "btts_calibrator.joblib")
 TRAINING_LOG_PATH  = os.path.join(ML_DIR, "training_log.json")
+
+# Accumulation cache — grows with every retrain
+CACHE_DIR  = os.path.join(os.path.dirname(ML_DIR), "data")
+CACHE_PATH = os.path.join(CACHE_DIR, "training_cache.npz")
 
 COMPETITIONS = ["PL", "PD", "BL1", "SA", "FL1", "ELC", "DED"]
 
 
+# ─── Model factory ────────────────────────────────────────────────────────────
+
 def _make_xgb(n_classes: int = 3) -> XGBClassifier:
     return XGBClassifier(
-        n_estimators=400,
+        n_estimators=500,
         max_depth=4,
-        learning_rate=0.04,
+        learning_rate=0.03,
         subsample=0.8,
         colsample_bytree=0.75,
         min_child_weight=3,
-        gamma=0.1,
+        gamma=0.15,
         use_label_encoder=False,
         eval_metric="mlogloss" if n_classes > 2 else "logloss",
         num_class=n_classes if n_classes > 2 else None,
@@ -47,29 +66,82 @@ def _make_xgb(n_classes: int = 3) -> XGBClassifier:
     )
 
 
-async def fetch_training_data():
-    """
-    Pull finished matches and build:
-      X           — feature matrix  (N, 28)
-      y_result    — 0=HOME, 1=DRAW, 2=AWAY
-      y_goals     — 0=Under2.5, 1=Over2.5
-      y_btts      — 0=No, 1=Yes
+# ─── Data cache ───────────────────────────────────────────────────────────────
 
-    Rate-limit strategy (free tier: 10 req/min = 1 req per 6s):
-      - Fetch team matches sequentially (not concurrently) with a 7s sleep each.
-      - Cache team matches by team_id — same team appears in many matches, so
-        this cuts API calls from ~2000 down to ~140 (one per unique team).
-      - Sleep 8s between competition-level requests.
-    """
+def _load_cache() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load accumulated training data from disk. Returns empty arrays if none."""
+    if not os.path.exists(CACHE_PATH):
+        return (
+            np.empty((0, N_FEATURES), dtype=np.float32),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+        )
+    try:
+        data = np.load(CACHE_PATH)
+        X = data["X"].astype(np.float32)
+        # Handle feature dimension mismatch (model upgrade added features)
+        if X.shape[1] != N_FEATURES:
+            print(f"  [cache] Feature mismatch ({X.shape[1]} vs {N_FEATURES}) — discarding old cache.")
+            return (
+                np.empty((0, N_FEATURES), dtype=np.float32),
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int64),
+            )
+        return X, data["y_result"], data["y_goals"], data["y_btts"]
+    except Exception as e:
+        print(f"  [cache] Load failed ({e}), starting fresh.")
+        return (
+            np.empty((0, N_FEATURES), dtype=np.float32),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+            np.array([], dtype=np.int64),
+        )
+
+
+def _save_cache(X, y_result, y_goals, y_btts) -> None:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    np.savez_compressed(CACHE_PATH, X=X, y_result=y_result, y_goals=y_goals, y_btts=y_btts)
+    print(f"  [cache] Saved {len(X)} samples to {CACHE_PATH}")
+
+
+def _merge(*arrays_tuple):
+    """Merge (X, yr, yg, yb) tuples, deduplicating on feature row hash."""
+    Xs, yrs, ygs, ybs = zip(*arrays_tuple)
+    X_all  = np.concatenate(Xs)
+    yr_all = np.concatenate(yrs)
+    yg_all = np.concatenate(ygs)
+    yb_all = np.concatenate(ybs)
+
+    if len(X_all) == 0:
+        return X_all, yr_all, yg_all, yb_all
+
+    # Deduplicate by rounding features to 4dp and hashing
+    seen = set()
+    keep = []
+    for i, row in enumerate(X_all):
+        key = tuple(round(float(v), 4) for v in row) + (int(yr_all[i]),)
+        if key not in seen:
+            seen.add(key)
+            keep.append(i)
+
+    return X_all[keep], yr_all[keep], yg_all[keep], yb_all[keep]
+
+
+# ─── API data fetcher ─────────────────────────────────────────────────────────
+
+async def fetch_api_training_data():
+    """Pull current-season finished matches from football-data.org API."""
     from app.services.football_api import get_finished_matches, get_team_matches, get_standings
 
     X, y_result, y_goals, y_btts = [], [], [], []
     skipped = 0
-    team_cache: dict[int, list] = {}  # team_id -> list of match dicts
+    team_cache: dict[int, list] = {}
 
     async def _cached_team_matches(team_id: int) -> list:
         if team_id not in team_cache:
-            await asyncio.sleep(7)  # 7s per request stays well under 10/min
+            await asyncio.sleep(7)
             try:
                 team_cache[team_id] = await get_team_matches(team_id, limit=25)
             except Exception:
@@ -78,10 +150,9 @@ async def fetch_training_data():
 
     for comp_idx, comp in enumerate(COMPETITIONS):
         if comp_idx > 0:
-            print(f"  Sleeping 8s before next competition...")
             await asyncio.sleep(8)
 
-        print(f"  [{comp}] Fetching matches...")
+        print(f"  [{comp}] Fetching matches…")
         try:
             matches = await get_finished_matches(comp, limit=150)
             await asyncio.sleep(8)
@@ -92,27 +163,26 @@ async def fetch_training_data():
             continue
 
         finished = [m for m in matches if m.get("status") == "FINISHED"]
-        print(f"  [{comp}] {len(finished)} finished matches — fetching team histories...")
+        print(f"  [{comp}] {len(finished)} finished matches — fetching team histories…")
 
         for i, match in enumerate(finished):
             home_id = match.get("homeTeam", {}).get("id")
             away_id = match.get("awayTeam", {}).get("id")
             hg = match.get("score", {}).get("fullTime", {}).get("home")
             ag = match.get("score", {}).get("fullTime", {}).get("away")
+            date_str = (match.get("utcDate") or "")[:10]
 
             if not all([home_id, away_id, hg is not None, ag is not None]):
                 skipped += 1
                 continue
 
-            # Labels
-            if hg > ag:    result_label = 0  # HOME
-            elif hg == ag: result_label = 1  # DRAW
-            else:          result_label = 2  # AWAY
+            if hg > ag:    result_label = 0
+            elif hg == ag: result_label = 1
+            else:          result_label = 2
 
             goals_label = 1 if (hg + ag) > 2 else 0
             btts_label  = 1 if (hg > 0 and ag > 0) else 0
 
-            # Fetch sequentially — cache means most calls are free after first fetch
             home_m = await _cached_team_matches(home_id)
             away_m = await _cached_team_matches(away_id)
 
@@ -122,6 +192,7 @@ async def fetch_training_data():
                 h2h_matches=[],
                 home_standing=standing_map.get(home_id),
                 away_standing=standing_map.get(away_id),
+                match_date=date_str,
             )
             X.append(vec)
             y_result.append(result_label)
@@ -129,49 +200,74 @@ async def fetch_training_data():
             y_btts.append(btts_label)
 
             if (i + 1) % 20 == 0:
-                print(f"    [{comp}] {i + 1}/{len(finished)} processed, {len(X)} samples so far...")
+                print(f"    [{comp}] {i + 1}/{len(finished)} processed, {len(X)} samples so far…")
 
-    print(f"\nTotal samples: {len(X)} | Skipped: {skipped} | Unique teams fetched: {len(team_cache)}")
+    print(f"\n  [api] {len(X)} samples | {skipped} skipped | {len(team_cache)} unique teams")
     return (
-        np.array(X, dtype=np.float32),
-        np.array(y_result),
-        np.array(y_goals),
-        np.array(y_btts),
+        np.array(X, dtype=np.float32) if X else np.empty((0, N_FEATURES), dtype=np.float32),
+        np.array(y_result), np.array(y_goals), np.array(y_btts),
     )
 
 
-def _train_and_eval(model: XGBClassifier, X: np.ndarray, y: np.ndarray, label: str) -> dict:
+# ─── Training + calibration ───────────────────────────────────────────────────
+
+def _train_and_calibrate(
+    X: np.ndarray, y: np.ndarray, label: str, n_classes: int,
+    model_path: str, cal_path: str,
+) -> dict:
+    """
+    1. 80/20 train/calibration split (stratified).
+    2. 5-fold CV on training split to get honest accuracy estimate.
+    3. Fit XGBoost on full training split.
+    4. Fit isotonic calibrator on calibration split.
+    5. Save both.
+    """
+    if len(np.unique(y)) < n_classes:
+        # Fall back to all-data fit if not enough class diversity
+        n_classes = len(np.unique(y))
+
+    X_train, X_cal, y_train, y_cal = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y,
+    )
+
+    model = _make_xgb(n_classes)
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    scores = cross_val_score(model, X, y, cv=cv, scoring="accuracy")
+    scores = cross_val_score(model, X_train, y_train, cv=cv, scoring="accuracy")
     print(f"  {label} CV accuracy: {scores.mean():.3f} ± {scores.std():.3f}")
-    model.fit(X, y)
+
+    model.fit(X_train, y_train)
+    joblib.dump(model, model_path)
+
+    # Isotonic calibration on held-out 20%
+    calibrator = CalibratedClassifierCV(model, method="isotonic", cv="prefit")
+    calibrator.fit(X_cal, y_cal)
+    joblib.dump(calibrator, cal_path)
+    print(f"  {label} calibrator fitted on {len(X_cal)} samples.")
+
     return {"accuracy_mean": float(scores.mean()), "accuracy_std": float(scores.std())}
 
 
-def train_all(
-    X: np.ndarray,
-    y_result: np.ndarray,
-    y_goals: np.ndarray,
-    y_btts: np.ndarray,
-) -> dict:
-    print("\nTraining result model (1X2)...")
-    result_model = _make_xgb(n_classes=3)
-    result_stats = _train_and_eval(result_model, X, y_result, "Result")
-    joblib.dump(result_model, RESULT_MODEL_PATH)
+def train_all(X, y_result, y_goals, y_btts) -> dict:
+    print(f"\nTraining on {len(X)} samples with {N_FEATURES} features…\n")
 
-    print("Training goals model (O/U 2.5)...")
-    goals_model = _make_xgb(n_classes=2)
-    goals_stats = _train_and_eval(goals_model, X, y_goals, "Goals")
-    joblib.dump(goals_model, GOALS_MODEL_PATH)
+    print("Training result model (1X2)…")
+    result_stats = _train_and_calibrate(
+        X, y_result, "Result", 3, RESULT_MODEL_PATH, RESULT_CAL_PATH,
+    )
 
-    print("Training BTTS model...")
-    btts_model = _make_xgb(n_classes=2)
-    btts_stats = _train_and_eval(btts_model, X, y_btts, "BTTS")
-    joblib.dump(btts_model, BTTS_MODEL_PATH)
+    print("Training goals model (O/U 2.5)…")
+    goals_stats = _train_and_calibrate(
+        X, y_goals, "Goals", 2, GOALS_MODEL_PATH, GOALS_CAL_PATH,
+    )
+
+    print("Training BTTS model…")
+    btts_stats = _train_and_calibrate(
+        X, y_btts, "BTTS", 2, BTTS_MODEL_PATH, BTTS_CAL_PATH,
+    )
 
     log = _load_training_log()
     entry = {
-        "trained_at": __import__("datetime").datetime.utcnow().isoformat(),
+        "trained_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         "samples": int(len(X)),
         "result_model": result_stats,
         "goals_model": goals_stats,
@@ -181,10 +277,11 @@ def train_all(
     }
     log.append(entry)
     _save_training_log(log)
-
-    print(f"\nAll models saved. Training log updated ({len(log)} entries).")
+    print(f"\nAll models + calibrators saved. Training log updated ({len(log)} entries).")
     return entry
 
+
+# ─── Log helpers ─────────────────────────────────────────────────────────────
 
 def _load_training_log() -> list:
     if os.path.exists(TRAINING_LOG_PATH):
@@ -206,13 +303,39 @@ def get_last_training_summary() -> dict:
     return log[-1] if log else {}
 
 
+# ─── Entry point ─────────────────────────────────────────────────────────────
+
 async def main():
-    print("=== Sports Bet Analysis — Model Training ===")
-    print("Fetching training data (this takes several minutes due to API rate limits)...\n")
-    X, y_result, y_goals, y_btts = await fetch_training_data()
+    print("=== Sports Bet Analysis — Model Training ===\n")
+
+    # 1. Load accumulated cache
+    print("Loading accumulated data cache…")
+    X_cache, yr_cache, yg_cache, yb_cache = _load_cache()
+    print(f"  Cache: {len(X_cache)} samples\n")
+
+    # 2. Download + load FDCO CSV data (no API calls)
+    print("Loading Football-Data.co.uk CSV data…")
+    from ml.fdco_trainer import build_fdco_training_data, download_all_csvs
+    await download_all_csvs()
+    X_fdco, yr_fdco, yg_fdco, yb_fdco, _ = build_fdco_training_data()
+    print()
+
+    # 3. Fetch fresh API data
+    print("Fetching current-season data from API (rate-limited)…\n")
+    X_api, yr_api, yg_api, yb_api = await fetch_api_training_data()
+    print()
+
+    # 4. Merge all sources + update cache
+    X, y_result, y_goals, y_btts = _merge(
+        (X_cache, yr_cache, yg_cache, yb_cache),
+        (X_fdco,  yr_fdco,  yg_fdco,  yb_fdco),
+        (X_api,   yr_api,   yg_api,   yb_api),
+    )
+    print(f"Total unique samples after merge: {len(X)}")
+    _save_cache(X, y_result, y_goals, y_btts)
 
     if len(X) < 50:
-        print("ERROR: Not enough training data. Check your API key and try again.")
+        print("ERROR: Not enough training data. Check your API key and CSV files.")
         return
 
     train_all(X, y_result, y_goals, y_btts)

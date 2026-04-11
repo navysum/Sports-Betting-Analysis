@@ -14,6 +14,7 @@ from app.services.football_api import (
 )
 from app.services.scraper import fetch_understat_team_xg
 from app.services.evaluator import append_prediction, build_ledger_entry
+from app.services.odds_api import find_match_odds
 from ml.features import build_feature_vector
 from ml.predict import predict
 
@@ -82,7 +83,14 @@ async def predict_match(
         away_standing=standing_map.get(away_team_id),
         home_xg=home_xg,
         away_xg=away_xg,
+        match_date=match_date or None,
     )
+
+    # Fetch live odds if not supplied and API key is configured
+    if bookmaker_odds is None and home_team_name and competition_code:
+        bookmaker_odds = await _safe(
+            find_match_odds(home_team_name, away_team_name, competition_code), None
+        )
 
     result = predict(vec, bookmaker_odds=bookmaker_odds)
 

@@ -5,7 +5,8 @@ import os
 class Settings(BaseSettings):
     # Football APIs
     football_data_api_key: str = ""
-    api_football_key: str = ""  # RapidAPI free tier — 100 req/day
+    api_football_key: str = ""       # RapidAPI free tier — 100 req/day
+    odds_api_key: str = ""           # the-odds-api.com — 500 req/month free
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./data/soccerbet.db"
