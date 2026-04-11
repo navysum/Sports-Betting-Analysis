@@ -9,6 +9,7 @@ Responsibilities:
   - Persist everything back to the JSON ledger and SQLite
 """
 import json
+import math
 import os
 from datetime import datetime, timedelta
 from typing import Optional
@@ -166,12 +167,71 @@ async def evaluate_recent_predictions() -> dict:
     }
 
 
+def _log_loss(settled: list[dict]) -> Optional[float]:
+    """
+    Multiclass log-loss on settled predictions.
+    Requires home_prob/draw_prob/away_prob stored in the ledger entry.
+    Lower is better (perfect model = 0, random = ~1.10).
+    """
+    eps = 1e-7
+    ll_sum = 0.0
+    count = 0
+    for e in settled:
+        pred   = e.get("prediction", {})
+        actual = e.get("actual", {})
+        result = actual.get("result")
+        if result not in ("HOME", "DRAW", "AWAY"):
+            continue
+        prob_map = {
+            "HOME": pred.get("home_prob"),
+            "DRAW": pred.get("draw_prob"),
+            "AWAY": pred.get("away_prob"),
+        }
+        p = prob_map.get(result)
+        if p is None:
+            continue
+        ll_sum += math.log(max(p, eps))
+        count += 1
+    return round(-ll_sum / count, 4) if count else None
+
+
+def _brier_score(settled: list[dict]) -> Optional[float]:
+    """
+    Multiclass Brier score on settled predictions.
+    Averaged over all 3 outcome classes. Range [0, 2]; lower is better.
+    Random classifier = ~0.67, good model ≈ 0.18–0.22.
+    """
+    bs_sum = 0.0
+    count  = 0
+    outcome_idx = {"HOME": 0, "DRAW": 1, "AWAY": 2}
+    for e in settled:
+        pred   = e.get("prediction", {})
+        actual = e.get("actual", {})
+        result = actual.get("result")
+        if result not in outcome_idx:
+            continue
+        probs = [
+            pred.get("home_prob"),
+            pred.get("draw_prob"),
+            pred.get("away_prob"),
+        ]
+        if None in probs:
+            continue
+        actual_oh = [0.0, 0.0, 0.0]
+        actual_oh[outcome_idx[result]] = 1.0
+        bs = sum((probs[i] - actual_oh[i]) ** 2 for i in range(3)) / 3.0
+        bs_sum += bs
+        count  += 1
+    return round(bs_sum / count, 4) if count else None
+
+
 def get_accuracy_stats(days: Optional[int] = None) -> dict:
     """
-    Compute accuracy over all settled predictions, optionally filtered
-    to the last N days.
+    Compute accuracy, log-loss, and Brier score over settled predictions,
+    optionally filtered to the last N days.
+
     Returns: {total, correct_result, result_accuracy, over25_accuracy,
-              btts_accuracy, window_days}
+              btts_accuracy, log_loss, brier_score, window_days}
     """
     ledger = _load_ledger()
     settled = [e for e in ledger if e.get("actual") is not None]
@@ -182,24 +242,34 @@ def get_accuracy_stats(days: Optional[int] = None) -> dict:
 
     if not settled:
         return {
-            "total": 0,
-            "correct_result": 0,
-            "result_accuracy": 0.0,
-            "over25_accuracy": None,
-            "btts_accuracy": None,
-            "window_days": days,
+            "total":            0,
+            "correct_result":   0,
+            "result_accuracy":  0.0,
+            "over25_accuracy":  None,
+            "btts_accuracy":    None,
+            "log_loss":         None,
+            "brier_score":      None,
+            "window_days":      days,
         }
 
     result_correct = [e for e in settled if e.get("correct", {}).get("result")]
-    o25_settled = [e for e in settled if e.get("correct", {}).get("over25") is not None]
-    btts_settled = [e for e in settled if e.get("correct", {}).get("btts") is not None]
+    o25_settled    = [e for e in settled if e.get("correct", {}).get("over25") is not None]
+    btts_settled   = [e for e in settled if e.get("correct", {}).get("btts")   is not None]
 
     return {
-        "total": len(settled),
-        "correct_result": len(result_correct),
+        "total":           len(settled),
+        "correct_result":  len(result_correct),
         "result_accuracy": round(len(result_correct) / len(settled), 4),
-        "over25_accuracy": round(sum(1 for e in o25_settled if e["correct"]["over25"]) / len(o25_settled), 4) if o25_settled else None,
-        "btts_accuracy": round(sum(1 for e in btts_settled if e["correct"]["btts"]) / len(btts_settled), 4) if btts_settled else None,
+        "over25_accuracy": (
+            round(sum(1 for e in o25_settled if e["correct"]["over25"]) / len(o25_settled), 4)
+            if o25_settled else None
+        ),
+        "btts_accuracy": (
+            round(sum(1 for e in btts_settled if e["correct"]["btts"]) / len(btts_settled), 4)
+            if btts_settled else None
+        ),
+        "log_loss":    _log_loss(settled),
+        "brier_score": _brier_score(settled),
         "window_days": days,
     }
 

@@ -17,3 +17,4 @@ beautifulsoup4==4.12.3
 lxml==5.2.2
 pytz==2024.1
 aiofiles==23.2.1
+scipy==1.13.1

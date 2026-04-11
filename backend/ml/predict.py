@@ -5,9 +5,13 @@ Loads XGBoost models + isotonic calibrators at startup. Calibrators produce
 better-calibrated probabilities than raw XGBoost outputs — especially important
 for value bet edge calculations.
 
-Also computes:
+Also blends Dixon-Coles Poisson model (when available and team names are known)
+to improve draw pricing and produce correct-score probabilities.
+
+Computes:
   - Star confidence rating (1–5)
   - Value bet flags (where model prob > implied bookmaker prob)
+  - Dixon-Coles expected goals and correct-score distribution
 """
 import os
 import numpy as np
@@ -27,18 +31,19 @@ BTTS_CAL_PATH     = os.path.join(ML_DIR, "btts_calibrator.joblib")
 # Legacy path for backward compatibility
 LEGACY_MODEL_PATH = os.path.join(ML_DIR, "model.joblib")
 
-_result_model     = None
-_goals_model      = None
-_btts_model       = None
-_result_cal       = None
-_goals_cal        = None
-_btts_cal         = None
+_result_model = None
+_goals_model  = None
+_btts_model   = None
+_result_cal   = None
+_goals_cal    = None
+_btts_cal     = None
+_dc_model     = None   # Dixon-Coles model (optional)
 
 
 def load_model():
-    """Load all models and calibrators. Falls back gracefully if calibrators absent."""
+    """Load all models and calibrators. Falls back gracefully if absent."""
     global _result_model, _goals_model, _btts_model
-    global _result_cal, _goals_cal, _btts_cal
+    global _result_cal, _goals_cal, _btts_cal, _dc_model
 
     if os.path.exists(RESULT_MODEL_PATH):
         _result_model = joblib.load(RESULT_MODEL_PATH)
@@ -61,7 +66,6 @@ def load_model():
     else:
         print("WARNING: No BTTS model found.")
 
-    # Calibrators (optional — present after first calibrated retrain)
     for path, name, var_name in [
         (RESULT_CAL_PATH, "result", "_result_cal"),
         (GOALS_CAL_PATH,  "goals",  "_goals_cal"),
@@ -71,8 +75,19 @@ def load_model():
             globals()[var_name] = joblib.load(path)
             print(f"{name.capitalize()} calibrator loaded.")
 
+    # Dixon-Coles model (optional — present after first retrain post-upgrade)
+    try:
+        from ml.dixon_coles import load_dc_model
+        _dc_model = load_dc_model()
+        if _dc_model:
+            print(f"Dixon-Coles model loaded ({len(_dc_model.attack)} teams).")
+        else:
+            print("Dixon-Coles model not found (will fit on next retrain).")
+    except Exception as e:
+        print(f"Dixon-Coles load failed: {e}")
 
-def _proba(model, calibrator, vec: np.ndarray) -> np.ndarray:
+
+def _proba(model, calibrator, vec: np.ndarray) -> Optional[np.ndarray]:
     """Return calibrated probabilities if calibrator is available, else raw."""
     if calibrator is not None:
         return calibrator.predict_proba(vec)[0]
@@ -99,43 +114,75 @@ def _is_value(model_prob: float, bookmaker_odds: Optional[float], min_edge: floa
 def predict(
     feature_vector: np.ndarray,
     bookmaker_odds: Optional[dict] = None,
+    home_team: str = "",
+    away_team: str = "",
 ) -> dict:
     """
     Run all available models and return a comprehensive prediction dict.
 
     bookmaker_odds (optional): {"home": 2.10, "draw": 3.40, "away": 3.20,
                                 "over25": 1.85, "btts": 1.75}
+    home_team / away_team: used for Dixon-Coles lookup (FDCO team names).
 
     Returns:
         home_win_prob, draw_prob, away_win_prob, predicted_outcome, confidence,
         stars, over25_prob, btts_prob, over25_predicted, btts_predicted,
-        value_bets, calibrated (bool)
+        value_bets, calibrated, dc_available, correct_scores, xg_home, xg_away
     """
-    vec = feature_vector.reshape(1, -1)
+    vec  = feature_vector.reshape(1, -1)
     odds = bookmaker_odds or {}
 
-    # --- Result model ---
+    # ── XGBoost result model ──────────────────────────────────────────────────
     result_probs = _proba(_result_model, _result_cal, vec)
     if result_probs is not None:
-        home_p, draw_p, away_p = float(result_probs[0]), float(result_probs[1]), float(result_probs[2])
+        home_p = float(result_probs[0])
+        draw_p = float(result_probs[1])
+        away_p = float(result_probs[2])
     else:
         home_p = draw_p = away_p = 1 / 3
 
+    # ── XGBoost goals + BTTS models ───────────────────────────────────────────
+    goals_probs = _proba(_goals_model, _goals_cal, vec)
+    over25_prob = float(goals_probs[1]) if goals_probs is not None else 0.5
+
+    btts_probs = _proba(_btts_model, _btts_cal, vec)
+    btts_prob  = float(btts_probs[1]) if btts_probs is not None else 0.5
+
+    # ── Dixon-Coles blend ─────────────────────────────────────────────────────
+    dc_info = None
+    correct_scores: list = []
+    xg_home = xg_away = None
+
+    if _dc_model and home_team and away_team:
+        from ml.dixon_coles import DC_BLEND_WEIGHT
+        dc_info = _dc_model.match_probs(home_team, away_team)
+        if dc_info:
+            w_dc  = DC_BLEND_WEIGHT
+            w_xgb = 1.0 - DC_BLEND_WEIGHT
+
+            home_p    = w_xgb * home_p    + w_dc * dc_info["home"]
+            draw_p    = w_xgb * draw_p    + w_dc * dc_info["draw"]
+            away_p    = w_xgb * away_p    + w_dc * dc_info["away"]
+            over25_prob = w_xgb * over25_prob + w_dc * dc_info["over25"]
+            btts_prob   = w_xgb * btts_prob   + w_dc * dc_info["btts"]
+
+            # Renormalise result probs to sum to 1
+            total = home_p + draw_p + away_p
+            if total > 0:
+                home_p /= total; draw_p /= total; away_p /= total
+
+            correct_scores = dc_info.get("correct_scores", [])
+            xg_home = dc_info.get("xg_home")
+            xg_away = dc_info.get("xg_away")
+
+    # ── Final outcome ─────────────────────────────────────────────────────────
     pred_idx = int(np.argmax([home_p, draw_p, away_p]))
     outcome_map = {0: "HOME", 1: "DRAW", 2: "AWAY"}
     predicted_outcome = outcome_map[pred_idx]
     confidence = round(max(home_p, draw_p, away_p), 4)
     stars = _star_rating(confidence)
 
-    # --- Goals model ---
-    goals_probs = _proba(_goals_model, _goals_cal, vec)
-    over25_prob = round(float(goals_probs[1]), 4) if goals_probs is not None else 0.5
-
-    # --- BTTS model ---
-    btts_probs = _proba(_btts_model, _btts_cal, vec)
-    btts_prob = round(float(btts_probs[1]), 4) if btts_probs is not None else 0.5
-
-    # --- Value bets ---
+    # ── Value bets ────────────────────────────────────────────────────────────
     value_bets = []
     if _is_value(home_p, odds.get("home")):
         value_bets.append(f"Home Win (model {home_p:.0%} vs implied {1/odds['home']:.0%})")
@@ -155,10 +202,14 @@ def predict(
         "predicted_outcome": predicted_outcome,
         "confidence":        confidence,
         "stars":             stars,
-        "over25_prob":       over25_prob,
-        "btts_prob":         btts_prob,
+        "over25_prob":       round(over25_prob, 4),
+        "btts_prob":         round(btts_prob, 4),
         "over25_predicted":  over25_prob >= 0.5,
         "btts_predicted":    btts_prob >= 0.5,
         "value_bets":        value_bets,
         "calibrated":        _result_cal is not None,
+        "dc_available":      dc_info is not None,
+        "correct_scores":    correct_scores,
+        "xg_home":           xg_home,
+        "xg_away":           xg_away,
     }

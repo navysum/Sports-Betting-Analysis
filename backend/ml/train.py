@@ -28,6 +28,7 @@ import joblib
 from xgboost import XGBClassifier
 from sklearn.model_selection import cross_val_score, StratifiedKFold, train_test_split
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.metrics import log_loss, brier_score_loss
 from ml.features import build_feature_vector, FEATURE_NAMES, N_FEATURES
 
 ML_DIR = os.path.dirname(__file__)
@@ -216,38 +217,60 @@ def _train_and_calibrate(
     model_path: str, cal_path: str,
 ) -> dict:
     """
-    1. 80/20 train/calibration split (stratified).
-    2. 5-fold CV on training split to get honest accuracy estimate.
+    1. Temporal 80/20 split (first 80% = train, last 20% = calibration).
+       This avoids future-leakage into the calibration set.
+    2. 5-fold stratified CV on training split for honest accuracy estimate.
     3. Fit XGBoost on full training split.
-    4. Fit isotonic calibrator on calibration split.
-    5. Save both.
+    4. Fit isotonic calibrator on temporal holdout.
+    5. Save both. Report log-loss + Brier on calibration split.
     """
     if len(np.unique(y)) < n_classes:
-        # Fall back to all-data fit if not enough class diversity
         n_classes = len(np.unique(y))
 
-    X_train, X_cal, y_train, y_cal = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y,
-    )
+    # Temporal split: first 80% for training, last 20% for calibration
+    split = int(len(X) * 0.8)
+    X_train, X_cal = X[:split], X[split:]
+    y_train, y_cal = y[:split], y[split:]
 
     model = _make_xgb(n_classes)
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    cv = StratifiedKFold(n_splits=5, shuffle=False)   # no shuffle = respects time order
     scores = cross_val_score(model, X_train, y_train, cv=cv, scoring="accuracy")
     print(f"  {label} CV accuracy: {scores.mean():.3f} ± {scores.std():.3f}")
 
     model.fit(X_train, y_train)
     joblib.dump(model, model_path)
 
-    # Isotonic calibration on held-out 20%
+    # Isotonic calibration on temporal holdout
     calibrator = CalibratedClassifierCV(model, method="isotonic", cv="prefit")
     calibrator.fit(X_cal, y_cal)
     joblib.dump(calibrator, cal_path)
-    print(f"  {label} calibrator fitted on {len(X_cal)} samples.")
 
-    return {"accuracy_mean": float(scores.mean()), "accuracy_std": float(scores.std())}
+    # Quality metrics on calibration set
+    cal_probs = calibrator.predict_proba(X_cal)
+    if n_classes > 2:
+        ll = log_loss(y_cal, cal_probs)
+        # Multiclass Brier: mean over all classes
+        from sklearn.preprocessing import label_binarize
+        y_bin = label_binarize(y_cal, classes=list(range(n_classes)))
+        brier = float(np.mean((cal_probs - y_bin) ** 2))
+    else:
+        ll    = log_loss(y_cal, cal_probs)
+        brier = brier_score_loss(y_cal, cal_probs[:, 1])
+
+    print(
+        f"  {label} calibrator — {len(X_cal)} samples | "
+        f"log-loss={ll:.4f} | brier={brier:.4f}"
+    )
+
+    return {
+        "accuracy_mean": float(scores.mean()),
+        "accuracy_std":  float(scores.std()),
+        "log_loss":      round(ll, 4),
+        "brier_score":   round(brier, 4),
+    }
 
 
-def train_all(X, y_result, y_goals, y_btts) -> dict:
+def train_all(X, y_result, y_goals, y_btts, odds_rows: list = None) -> dict:
     print(f"\nTraining on {len(X)} samples with {N_FEATURES} features…\n")
 
     print("Training result model (1X2)…")
@@ -265,15 +288,44 @@ def train_all(X, y_result, y_goals, y_btts) -> dict:
         X, y_btts, "BTTS", 2, BTTS_MODEL_PATH, BTTS_CAL_PATH,
     )
 
+    # ── Dixon-Coles model ────────────────────────────────────────────────────
+    dc_stats = {}
+    if odds_rows:
+        print("\nFitting Dixon-Coles model…")
+        from ml.dixon_coles import DixonColesModel, save_dc_model, MAX_MATCHES
+        dc_matches = [
+            {
+                "home":       r["home"],
+                "away":       r["away"],
+                "home_goals": r.get("home_goals", 0),
+                "away_goals": r.get("away_goals", 0),
+                "date":       r.get("date", "2020-01-01"),
+            }
+            for r in odds_rows
+            if r.get("home") and r.get("away")
+        ]
+        # Use most recent matches for DC (time decay handles recency but cap for speed)
+        dc_matches.sort(key=lambda m: m["date"])
+        dc_matches = dc_matches[-MAX_MATCHES:]
+        dc = DixonColesModel()
+        dc.fit(dc_matches)
+        if dc._fitted:
+            save_dc_model(dc)
+            dc_stats = {"teams": len(dc.attack), "matches_used": len(dc_matches)}
+        else:
+            print("  [dc] Fitting did not converge — skipping save.")
+
     log = _load_training_log()
+    from datetime import datetime, timezone
     entry = {
-        "trained_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-        "samples": int(len(X)),
-        "result_model": result_stats,
-        "goals_model": goals_stats,
-        "btts_model": btts_stats,
+        "trained_at":    datetime.now(timezone.utc).isoformat(),
+        "samples":       int(len(X)),
+        "result_model":  result_stats,
+        "goals_model":   goals_stats,
+        "btts_model":    btts_stats,
+        "dixon_coles":   dc_stats,
         "feature_count": N_FEATURES,
-        "features": FEATURE_NAMES,
+        "features":      FEATURE_NAMES,
     }
     log.append(entry)
     _save_training_log(log)
@@ -317,7 +369,7 @@ async def main():
     print("Loading Football-Data.co.uk CSV data…")
     from ml.fdco_trainer import build_fdco_training_data, download_all_csvs
     await download_all_csvs()
-    X_fdco, yr_fdco, yg_fdco, yb_fdco, _ = build_fdco_training_data()
+    X_fdco, yr_fdco, yg_fdco, yb_fdco, odds_rows_fdco = build_fdco_training_data()
     print()
 
     # 3. Fetch fresh API data
@@ -338,7 +390,9 @@ async def main():
         print("ERROR: Not enough training data. Check your API key and CSV files.")
         return
 
-    train_all(X, y_result, y_goals, y_btts)
+    # Pass odds_rows from FDCO for Dixon-Coles fitting
+    # (odds_rows from CSV data have home_goals/away_goals; API data doesn't)
+    train_all(X, y_result, y_goals, y_btts, odds_rows=odds_rows_fdco)
 
 
 if __name__ == "__main__":

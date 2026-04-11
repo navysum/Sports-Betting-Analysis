@@ -460,12 +460,26 @@ async def cmd_retrain(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         import asyncio
         from ml.train import main as train_main
         await train_main()
+
+        # Reload ELO and DC models in prediction service after retrain
+        import app.services.prediction_service as ps
+        from ml.elo import load_elo_ratings
+        ps._elo = load_elo_ratings()
+
+        # Reload DC model in predict module
+        from ml.predict import load_model
+        load_model()
+
         summary = get_last_training_summary()
-        r_acc = summary.get("result_model", {}).get("accuracy_mean", 0)
+        r_acc  = summary.get("result_model", {}).get("accuracy_mean", 0)
+        r_ll   = summary.get("result_model", {}).get("log_loss", "?")
+        dc     = summary.get("dixon_coles", {})
+        dc_str = f"\n  DC teams: {dc.get('teams', '?')}" if dc else ""
         await _reply(update, (
             f"✅ *Retrain complete*\n"
             f"  Samples: {summary.get('samples', '?')}\n"
             f"  Result model CV: {r_acc:.1%}\n"
+            f"  Log\\-loss: {r_ll}{dc_str}\n"
             f"  Completed: {summary.get('trained_at', '')[:16]}"
         ))
     except Exception as e:
@@ -501,7 +515,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "*Fixtures & Predictions*\n"
         "  /today — Today's fixtures \\& predictions\n"
         "  /tomorrow — Tomorrow's fixtures \\& predictions\n"
-        "  /analyse Arsenal vs Chelsea — Deep analysis\n"
+        "  /analyse Arsenal vs Chelsea — Deep analysis \\+ correct scores\n"
         "  /a Arsenal Chelsea — Short alias\n\n"
         "*Team Data*\n"
         "  /form Arsenal — Last 10 match form\n"
@@ -514,10 +528,11 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /bets — Active bets\n"
         "  /pnl — Profit \\& loss summary\n\n"
         "*Model*\n"
-        "  /accuracy — Model accuracy stats\n"
+        "  /accuracy — Accuracy \\+ log\\-loss \\+ Brier score\n"
         "  /backtest — Simulate historical staking \\(FDCO data\\)\n"
         "  /retrain — Force model retrain \\(admin\\)\n"
         "  /leagues — Tracked leagues list\n"
-        "  /help — This message"
+        "  /help — This message\n\n"
+        "_Engine: XGBoost \\+ Dixon\\-Coles ensemble \\+ ELO \\+ bookmaker odds features_"
     )
     await _reply(update, text)

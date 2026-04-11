@@ -195,14 +195,37 @@ def format_match_analysis(
     form_home = " ".join(_form_emoji(r) for r in home_form[-5:])
     form_away = " ".join(_form_emoji(r) for r in away_form[-5:])
 
+    hp = _pct(prediction.get("home_win_prob"))
+    dp = _pct(prediction.get("draw_prob"))
+    ap = _pct(prediction.get("away_win_prob"))
+
     lines = [
         f"*🔍 Match Analysis*",
         f"*{home} vs {away}*" + (f" \\| {comp}" if comp else ""),
         "",
         f"*Prediction:* {emoji} {_esc(outcome.title())} {stars}",
-        f"*Confidence:* {_pct(prediction.get('confidence'))}",
-        f"*Over 2\\.5:* {_pct(prediction.get('over25_prob'))}",
-        f"*BTTS:* {_pct(prediction.get('btts_prob'))}",
+        f"*H / D / A:*   {hp} \\| {dp} \\| {ap}",
+        f"*Over 2\\.5:* {_pct(prediction.get('over25_prob'))}  \\|  *BTTS:* {_pct(prediction.get('btts_prob'))}",
+        "",
+    ]
+
+    # Dixon-Coles expected goals + correct scores
+    xg_home = prediction.get("xg_home")
+    xg_away = prediction.get("xg_away")
+    if xg_home is not None and xg_away is not None:
+        lines.append(
+            f"*xG \\(DC model\\):* {home} {_esc(str(round(xg_home, 2)))} "
+            f"\\| {away} {_esc(str(round(xg_away, 2)))}"
+        )
+    correct_scores = prediction.get("correct_scores", [])
+    if correct_scores:
+        top = "  ".join(
+            f"`{s['score']}` {_esc(f'{s[\"prob\"]:.0%}')}"
+            for s in correct_scores[:4]
+        )
+        lines.append(f"*🎯 Likely Scores:* {top}")
+
+    lines += [
         "",
         f"*Form \\(last 5\\)*",
         f"  {home}: {form_home}",
@@ -384,9 +407,14 @@ def format_accuracy(stats_7d: dict, stats_30d: dict, stats_all: dict) -> str:
         r_acc = _pct(s.get("result_accuracy"))
         o_acc = _pct(s.get("over25_accuracy")) if s.get("over25_accuracy") is not None else "N/A"
         b_acc = _pct(s.get("btts_accuracy"))   if s.get("btts_accuracy")   is not None else "N/A"
+        ll    = s.get("log_loss")
+        brier = s.get("brier_score")
+        ll_str    = _esc(f"{ll:.3f}")    if ll    is not None else "N/A"
+        brier_str = _esc(f"{brier:.3f}") if brier is not None else "N/A"
         return (
             f"*{_esc(label)}* \\({s['total']} predictions\\)\n"
-            f"  Result: {r_acc} \\| Over2\\.5: {o_acc} \\| BTTS: {b_acc}"
+            f"  Result: {r_acc} \\| Over2\\.5: {o_acc} \\| BTTS: {b_acc}\n"
+            f"  Log\\-loss: {ll_str} \\| Brier: {brier_str}"
         )
 
     lines = [
@@ -397,6 +425,9 @@ def format_accuracy(stats_7d: dict, stats_30d: dict, stats_all: dict) -> str:
         _row("Last 30 days", stats_30d),
         "",
         _row("All time", stats_all),
+        "",
+        "_Log\\-loss: lower = better \\(random ≈ 1\\.10\\)_",
+        "_Brier: lower = better \\(random ≈ 0\\.67\\)_",
     ]
     return "\n".join(lines)
 
