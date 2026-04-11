@@ -54,16 +54,37 @@ async def fetch_training_data():
       y_result    — 0=HOME, 1=DRAW, 2=AWAY
       y_goals     — 0=Under2.5, 1=Over2.5
       y_btts      — 0=No, 1=Yes
+
+    Rate-limit strategy (free tier: 10 req/min = 1 req per 6s):
+      - Fetch team matches sequentially (not concurrently) with a 7s sleep each.
+      - Cache team matches by team_id — same team appears in many matches, so
+        this cuts API calls from ~2000 down to ~140 (one per unique team).
+      - Sleep 8s between competition-level requests.
     """
     from app.services.football_api import get_finished_matches, get_team_matches, get_standings
 
     X, y_result, y_goals, y_btts = [], [], [], []
     skipped = 0
+    team_cache: dict[int, list] = {}  # team_id -> list of match dicts
 
-    for comp in COMPETITIONS:
+    async def _cached_team_matches(team_id: int) -> list:
+        if team_id not in team_cache:
+            await asyncio.sleep(7)  # 7s per request stays well under 10/min
+            try:
+                team_cache[team_id] = await get_team_matches(team_id, limit=25)
+            except Exception:
+                team_cache[team_id] = []
+        return team_cache[team_id]
+
+    for comp_idx, comp in enumerate(COMPETITIONS):
+        if comp_idx > 0:
+            print(f"  Sleeping 8s before next competition...")
+            await asyncio.sleep(8)
+
         print(f"  [{comp}] Fetching matches...")
         try:
-            matches = await get_finished_matches(comp, limit=380)
+            matches = await get_finished_matches(comp, limit=150)
+            await asyncio.sleep(8)
             standings_table = await get_standings(comp)
             standing_map = {row["team"]["id"]: row for row in standings_table}
         except Exception as e:
@@ -71,7 +92,7 @@ async def fetch_training_data():
             continue
 
         finished = [m for m in matches if m.get("status") == "FINISHED"]
-        print(f"  [{comp}] {len(finished)} finished matches")
+        print(f"  [{comp}] {len(finished)} finished matches — fetching team histories...")
 
         for i, match in enumerate(finished):
             home_id = match.get("homeTeam", {}).get("id")
@@ -84,21 +105,16 @@ async def fetch_training_data():
                 continue
 
             # Labels
-            if hg > ag:   result_label = 0  # HOME
+            if hg > ag:    result_label = 0  # HOME
             elif hg == ag: result_label = 1  # DRAW
             else:          result_label = 2  # AWAY
 
             goals_label = 1 if (hg + ag) > 2 else 0
             btts_label  = 1 if (hg > 0 and ag > 0) else 0
 
-            try:
-                home_m, away_m = await asyncio.gather(
-                    get_team_matches(home_id, limit=25),
-                    get_team_matches(away_id, limit=25),
-                )
-            except Exception:
-                skipped += 1
-                continue
+            # Fetch sequentially — cache means most calls are free after first fetch
+            home_m = await _cached_team_matches(home_id)
+            away_m = await _cached_team_matches(away_id)
 
             vec = build_feature_vector(
                 home_id, away_id,
@@ -112,11 +128,10 @@ async def fetch_training_data():
             y_goals.append(goals_label)
             y_btts.append(btts_label)
 
-            # Rate-limit respect — pause every 10 matches
-            if (i + 1) % 10 == 0:
-                await asyncio.sleep(6)
+            if (i + 1) % 20 == 0:
+                print(f"    [{comp}] {i + 1}/{len(finished)} processed, {len(X)} samples so far...")
 
-    print(f"\nTotal samples: {len(X)} | Skipped: {skipped}")
+    print(f"\nTotal samples: {len(X)} | Skipped: {skipped} | Unique teams fetched: {len(team_cache)}")
     return (
         np.array(X, dtype=np.float32),
         np.array(y_result),
