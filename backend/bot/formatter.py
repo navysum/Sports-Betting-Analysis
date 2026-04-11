@@ -484,6 +484,90 @@ def format_backtest(result: dict) -> str:
     return "\n".join(lines)
 
 
+def format_saved_tips_report(tips: list[dict]) -> str:
+    """
+    23:00 nightly report for user-saved predictions.
+    Each tip dict: {home, away, competition, prediction, actual, correct, settled}
+    """
+    lines = [
+        "*🌙 Nightly Tips Report*",
+        f"_{_esc(datetime.now(TZ).strftime('%A %-d %B %Y'))}_",
+        "",
+    ]
+
+    if not tips:
+        lines.append("_No saved tips for today\\._")
+        return "\n".join(lines)
+
+    settled   = [t for t in tips if t.get("settled")]
+    unsettled = [t for t in tips if not t.get("settled")]
+
+    for tip in settled:
+        home   = _esc(tip.get("home", "?"))
+        away   = _esc(tip.get("away", "?"))
+        pred   = tip.get("prediction", {})
+        actual = tip.get("actual", {})
+        correct = tip.get("correct", {})
+
+        pred_result = pred.get("result", "?")
+        act_result  = actual.get("result", "?")
+        score       = _esc(actual.get("score", "?-?"))
+        emoji_r     = RESULT_EMOJI.get(correct.get("result"), "❓")
+        outcome_esc = _esc(pred_result.title())
+
+        lines.append(f"{emoji_r} *{home} vs {away}*")
+        lines.append(f"   Predicted: {_esc(pred_result.title())}  \\|  Result: {_esc(act_result.title())} \\({score}\\)")
+
+        over25_correct = correct.get("over25")
+        btts_correct   = correct.get("btts")
+        subs = []
+        if over25_correct is not None:
+            subs.append(f"O2\\.5 {RESULT_EMOJI.get(over25_correct,'❓')}")
+        if btts_correct is not None:
+            subs.append(f"BTTS {RESULT_EMOJI.get(btts_correct,'❓')}")
+        if subs:
+            lines.append(f"   {' \\| '.join(subs)}")
+        lines.append("")
+
+    if unsettled:
+        names = ", ".join(
+            _esc(f"{t.get('home','?')} vs {t.get('away','?')}")
+            for t in unsettled[:5]
+        )
+        lines.append(f"_⏳ {len(unsettled)} tip\\(s\\) not yet settled: {names}_")
+
+    correct_count = sum(1 for t in settled if t.get("correct", {}).get("result"))
+    if settled:
+        lines += [
+            "",
+            f"*Score: {correct_count}/{len(settled)} correct*",
+        ]
+
+    return "\n".join(lines)
+
+
+def format_saved_tips_list(tips: list[dict]) -> str:
+    """Show currently saved tips (all unsettled ones still in the list)."""
+    lines = ["*📌 Saved Tips*", ""]
+    if not tips:
+        lines.append("_No saved tips\\. Reply to any prediction with \"save prediction\" to pin it\\._")
+        return "\n".join(lines)
+
+    for tip in tips:
+        home   = _esc(tip.get("home", "?"))
+        away   = _esc(tip.get("away", "?"))
+        pred   = tip.get("prediction", {})
+        result = _esc((pred.get("result") or "?").title())
+        conf   = _pct(pred.get("confidence"))
+        comp   = _esc(tip.get("competition", ""))
+        date   = _esc(tip.get("date", ""))
+        lines.append(f"  📌 *{home} vs {away}* \\({comp}\\)")
+        lines.append(f"     {result} {conf}  ·  {date}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def format_weekly_report(
     accuracy_7d: dict,
     bets: list[dict],

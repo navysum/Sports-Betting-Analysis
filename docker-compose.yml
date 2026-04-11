@@ -10,6 +10,11 @@ services:
       - backend_data:/app
     expose:
       - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
 
   frontend:
     build: ./frontend

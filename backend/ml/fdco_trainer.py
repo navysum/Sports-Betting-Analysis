@@ -23,11 +23,12 @@ from app.config import settings
 from ml.features import build_feature_vector, N_FEATURES
 from ml.elo import EloSystem, save_elo_ratings
 
-# Seasons to load (most recent first; earlier seasons used first for training)
-SEASONS = ["2021", "2122", "2223", "2324", "2425"]
+# Seasons to load — chronological order for correct form/standings accumulation
+SEASONS = ["1718", "1819", "1920", "2021", "2122", "2223", "2324", "2425"]
 
 # football-data.co.uk season codes  (URL path segment)
 FDCO_SEASON_CODES = {
+    "1718": "1718", "1819": "1819", "1920": "1920",
     "2021": "2021", "2122": "2122", "2223": "2223",
     "2324": "2324", "2425": "2425",
 }
@@ -321,7 +322,7 @@ async def download_all_csvs(seasons: list[str] = None) -> None:
     """Download FDCO CSVs for all leagues and seasons."""
     from app.services.scraper import download_fdco_csv
     if seasons is None:
-        seasons = ["2425", "2324", "2223", "2122", "2021"]
+        seasons = ["2425", "2324", "2223", "2122", "2021", "1920", "1819", "1718"]
     print(f"  [fdco] Downloading CSVs for {len(FDCO_LEAGUES)} leagues × {len(seasons)} seasons…")
     for season in seasons:
         for league_code in FDCO_LEAGUES:

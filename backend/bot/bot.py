@@ -10,7 +10,8 @@ or via the top-level wrapper:
 import logging
 import sys
 
-from telegram.ext import Application, CommandHandler
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from app.config import settings
 from ml.predict import load_model
@@ -28,10 +29,13 @@ from bot.commands import (
     cmd_bets,
     cmd_pnl,
     cmd_accuracy,
+    cmd_leaguestats,
     cmd_backtest,
     cmd_retrain,
     cmd_leagues,
+    cmd_saved,
     cmd_help,
+    handle_save_prediction,
 )
 from bot.scheduler import register_jobs
 
@@ -60,27 +64,35 @@ def build_app() -> Application:
 
     # Register command handlers
     handlers = [
-        ("today",      cmd_today),
-        ("tomorrow",   cmd_tomorrow),
-        ("analyse",    cmd_analyse),
-        ("a",          cmd_a),
-        ("form",       cmd_form),
-        ("h2h",        cmd_h2h),
-        ("injuries",   cmd_injuries),
-        ("standings",  cmd_standings),
-        ("bet",        cmd_bet),
-        ("settle",     cmd_settle),
-        ("bets",       cmd_bets),
-        ("pnl",        cmd_pnl),
-        ("accuracy",   cmd_accuracy),
-        ("backtest",   cmd_backtest),
-        ("retrain",    cmd_retrain),
-        ("leagues",    cmd_leagues),
-        ("help",       cmd_help),
-        ("start",      cmd_help),
+        ("today",        cmd_today),
+        ("tomorrow",     cmd_tomorrow),
+        ("analyse",      cmd_analyse),
+        ("a",            cmd_a),
+        ("form",         cmd_form),
+        ("h2h",          cmd_h2h),
+        ("injuries",     cmd_injuries),
+        ("standings",    cmd_standings),
+        ("bet",          cmd_bet),
+        ("settle",       cmd_settle),
+        ("bets",         cmd_bets),
+        ("pnl",          cmd_pnl),
+        ("accuracy",     cmd_accuracy),
+        ("leaguestats",  cmd_leaguestats),
+        ("backtest",     cmd_backtest),
+        ("retrain",      cmd_retrain),
+        ("leagues",      cmd_leagues),
+        ("saved",        cmd_saved),
+        ("help",         cmd_help),
+        ("start",        cmd_help),
     ]
     for name, handler in handlers:
         app.add_handler(CommandHandler(name, handler))
+
+    # Reply handler — user replies to any bot message with "save prediction"
+    app.add_handler(MessageHandler(
+        filters.REPLY & filters.TEXT & filters.Regex(r"(?i)save\s+prediction"),
+        handle_save_prediction,
+    ))
 
     # Register scheduled jobs
     register_jobs(app)
