@@ -17,6 +17,10 @@ from app.services.evaluator import append_prediction, build_ledger_entry
 from app.services.odds_api import find_match_odds
 from ml.features import build_feature_vector
 from ml.predict import predict
+from ml.elo import load_elo_ratings, EloSystem
+
+# ELO ratings loaded once at module import (refreshed on retrain)
+_elo: EloSystem = load_elo_ratings()
 
 
 async def _safe(coro, default=None):
@@ -73,6 +77,21 @@ async def predict_match(
 
     standing_map = {row["team"]["id"]: row for row in (standings_table or [])}
 
+    # ELO difference (home team strength vs away team strength)
+    # Uses FDCO team names — may return 0.0 if API names don't match
+    elo_diff = _elo.get_diff(home_team_name, away_team_name) if home_team_name else 0.0
+
+    # Fetch live odds if not supplied and API key is configured
+    if bookmaker_odds is None and home_team_name and competition_code:
+        bookmaker_odds = await _safe(
+            find_match_odds(home_team_name, away_team_name, competition_code), None
+        )
+
+    # Extract decimal odds for feature engineering (0.0 if unavailable)
+    h_odds = (bookmaker_odds or {}).get("home") or 0.0
+    d_odds = (bookmaker_odds or {}).get("draw") or 0.0
+    a_odds = (bookmaker_odds or {}).get("away") or 0.0
+
     vec = build_feature_vector(
         home_id=home_team_id,
         away_id=away_team_id,
@@ -84,15 +103,18 @@ async def predict_match(
         home_xg=home_xg,
         away_xg=away_xg,
         match_date=match_date or None,
+        elo_diff=elo_diff,
+        home_odds=h_odds,
+        draw_odds=d_odds,
+        away_odds=a_odds,
     )
 
-    # Fetch live odds if not supplied and API key is configured
-    if bookmaker_odds is None and home_team_name and competition_code:
-        bookmaker_odds = await _safe(
-            find_match_odds(home_team_name, away_team_name, competition_code), None
-        )
-
-    result = predict(vec, bookmaker_odds=bookmaker_odds)
+    result = predict(
+        vec,
+        bookmaker_odds=bookmaker_odds,
+        home_team=home_team_name,
+        away_team=away_team_name,
+    )
 
     # Optionally persist to ledger
     if save_to_ledger and home_team_name and away_team_name:
@@ -113,13 +135,17 @@ async def predict_match(
             home=home_team_name,
             away=away_team_name,
             prediction={
-                "result": result["predicted_outcome"],
-                "confidence": result["confidence"],
-                "over_2.5_prob": result["over25_prob"],
-                "btts_prob": result["btts_prob"],
+                "result":            result["predicted_outcome"],
+                "confidence":        result["confidence"],
+                "home_prob":         result["home_win_prob"],
+                "draw_prob":         result["draw_prob"],
+                "away_prob":         result["away_win_prob"],
+                "over_2.5_prob":     result["over25_prob"],
+                "btts_prob":         result["btts_prob"],
                 "over_2.5_predicted": result["over25_predicted"],
-                "btts_predicted": result["btts_predicted"],
-                "stars": result["stars"],
+                "btts_predicted":    result["btts_predicted"],
+                "stars":             result["stars"],
+                "dc_available":      result.get("dc_available", False),
             },
             factors_used=_factors_used(home_xg, h2h_matches),
             key_factors=key_factors,

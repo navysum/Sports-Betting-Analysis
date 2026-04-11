@@ -20,7 +20,8 @@ import pandas as pd
 from typing import Optional
 
 from app.config import settings
-from ml.features import build_feature_vector
+from ml.features import build_feature_vector, N_FEATURES
+from ml.elo import EloSystem, save_elo_ratings
 
 # Seasons to load (most recent first; earlier seasons used first for training)
 SEASONS = ["2021", "2122", "2223", "2324", "2425"]
@@ -176,7 +177,14 @@ def build_fdco_training_data(
     odds_rows = []
     total_files = 0
 
+    # Per-league ELO systems that persist across seasons (team strength is continuous)
+    league_elo: dict[str, EloSystem] = {}
+
     for league_code, division in FDCO_LEAGUES.items():
+        # Fresh ELO for each league — cross-league mixing not meaningful for domestic
+        elo = EloSystem()
+        league_elo[league_code] = elo
+
         for season in SEASONS:
             path = os.path.join(csv_dir, f"{league_code}_{season}.csv")
             if not os.path.exists(path):
@@ -227,6 +235,14 @@ def build_fdco_training_data(
                 goals_label = 1 if (hg + ag) > 2 else 0
                 btts_label  = 1 if (hg > 0 and ag > 0) else 0
 
+                # Pre-match ELO difference (computed BEFORE updating ELO)
+                elo_diff = elo.get_diff(home_name, away_name)
+
+                # Bookmaker odds as features (0.0 if missing)
+                h_odds = m.get("_b365h") or 0.0
+                d_odds = m.get("_b365d") or 0.0
+                a_odds = m.get("_b365a") or 0.0
+
                 vec = build_feature_vector(
                     home_id=home_id,
                     away_id=away_id,
@@ -239,6 +255,10 @@ def build_fdco_training_data(
                     home_standing=table.standing(home_name),
                     away_standing=table.standing(away_name),
                     match_date=date_str,
+                    elo_diff=elo_diff,
+                    home_odds=h_odds,
+                    draw_odds=d_odds,
+                    away_odds=a_odds,
                 )
 
                 X_all.append(vec)
@@ -246,12 +266,14 @@ def build_fdco_training_data(
                 y_goals_all.append(goals_label)
                 y_btts_all.append(btts_label)
 
-                # Record odds for backtesting
+                # Record odds for backtesting + DC model building
                 odds_rows.append({
                     "date": date_str,
                     "league": league_code,
                     "home": home_name,
                     "away": away_name,
+                    "home_goals": hg,
+                    "away_goals": ag,
                     "result_label": result_label,
                     "goals_label": goals_label,
                     "btts_label": btts_label,
@@ -261,18 +283,29 @@ def build_fdco_training_data(
                     "feature_idx": len(X_all) - 1,  # index into X
                 })
 
-                # Update running state for future matches
+                # Update running state AFTER feature vector is built (no future leakage)
                 table.update(home_name, away_name, hg, ag)
                 team_history.setdefault(home_id, []).append(m)
                 team_history.setdefault(away_id, []).append(m)
+                elo.process_match(home_name, away_name, hg, ag)
 
     if not X_all:
         print(f"  [fdco] No CSV data found in {csv_dir}. Run scraper first.")
         return (
-            np.empty((0, 30), dtype=np.float32),
+            np.empty((0, N_FEATURES), dtype=np.float32),
             np.array([]), np.array([]), np.array([]),
             [],
         )
+
+    # Persist merged ELO ratings (most recent per-league ratings saved globally)
+    # Teams in different leagues keep separate histories, merged here for inference
+    merged_elo = EloSystem()
+    for elo in league_elo.values():
+        for team, rating in elo._ratings.items():
+            # If same team name in multiple leagues (rare), keep higher rating
+            if team not in merged_elo._ratings or rating > merged_elo._ratings[team]:
+                merged_elo._ratings[team] = rating
+    save_elo_ratings(merged_elo)
 
     print(f"  [fdco] {total_files} CSV files → {len(X_all)} training samples")
     return (

@@ -136,9 +136,15 @@ def build_feature_vector(
     home_xg: float = 0.0,
     away_xg: float = 0.0,
     match_date: Optional[str] = None,
+    # ELO signal (home_elo - away_elo, clamped to ±600). 0.0 when unavailable.
+    elo_diff: float = 0.0,
+    # Bookmaker decimal odds. 0.0 when unavailable. Model learns to ignore zeros.
+    home_odds: float = 0.0,
+    draw_odds: float = 0.0,
+    away_odds: float = 0.0,
 ) -> np.ndarray:
     """
-    Returns a 1-D float32 numpy feature vector (30 features).
+    Returns a 1-D float32 numpy feature vector (34 features).
     Feature order MUST stay consistent with training — do not reorder.
     """
     # --- Form (exponentially weighted) ---
@@ -198,26 +204,34 @@ def build_feature_vector(
         home_days_rest, away_days_rest,
         # xG (2)
         home_xg, away_xg,
+        # ELO (1) — home ELO minus away ELO, clamped ±600
+        elo_diff,
+        # Market odds (3) — decimal bookmaker odds, 0.0 if unavailable
+        home_odds, draw_odds, away_odds,
     ], dtype=np.float32)
 
 
 FEATURE_NAMES = [
-    # Form
+    # Form (6)
     "home_form5", "home_form10", "away_form5", "away_form10",
     "form_diff", "home_momentum",
-    # Goals
+    # Goals (8)
     "home_gf_avg", "home_ga_avg", "away_gf_avg", "away_ga_avg",
     "home_gf_home", "home_ga_home", "away_gf_away", "away_ga_away",
-    # H2H
+    # H2H (3)
     "h2h_home_rate", "h2h_draw_rate", "h2h_away_rate",
-    # Standing
+    # Standing (5)
     "home_position", "away_position", "home_ppg", "away_ppg", "pos_diff",
-    # Derived
+    # Derived (4)
     "ppg_diff", "total_goals_avg", "goal_diff_avg", "clean_sheet_rate",
-    # Rest
+    # Rest (2)
     "home_days_rest", "away_days_rest",
-    # xG
+    # xG (2)
     "home_xg_for", "away_xg_for",
+    # ELO (1)
+    "elo_diff",
+    # Market odds (3)
+    "b365_home_odds", "b365_draw_odds", "b365_away_odds",
 ]
 
-N_FEATURES = len(FEATURE_NAMES)  # 30
+N_FEATURES = len(FEATURE_NAMES)  # 34
