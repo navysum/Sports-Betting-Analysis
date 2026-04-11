@@ -15,6 +15,7 @@ from app.services.football_api import (
 from app.services.scraper import fetch_understat_team_xg
 from app.services.evaluator import append_prediction, build_ledger_entry
 from app.services.odds_api import find_match_odds
+from app.utils.team_names import resolve as resolve_team
 from ml.features import build_feature_vector
 from ml.predict import predict
 from ml.elo import load_elo_ratings, EloSystem
@@ -77,9 +78,13 @@ async def predict_match(
 
     standing_map = {row["team"]["id"]: row for row in (standings_table or [])}
 
+    # Resolve API team names → FDCO names for ELO and Dixon-Coles lookups
+    home_fdco = resolve_team(home_team_name) if home_team_name else home_team_name
+    away_fdco = resolve_team(away_team_name) if away_team_name else away_team_name
+
     # ELO difference (home team strength vs away team strength)
-    # Uses FDCO team names — may return 0.0 if API names don't match
-    elo_diff = _elo.get_diff(home_team_name, away_team_name) if home_team_name else 0.0
+    # Uses FDCO team names — now resolved via alias map
+    elo_diff = _elo.get_diff(home_fdco, away_fdco) if home_fdco else 0.0
 
     # Fetch live odds if not supplied and API key is configured
     if bookmaker_odds is None and home_team_name and competition_code:
@@ -112,8 +117,8 @@ async def predict_match(
     result = predict(
         vec,
         bookmaker_odds=bookmaker_odds,
-        home_team=home_team_name,
-        away_team=away_team_name,
+        home_team=home_fdco,
+        away_team=away_fdco,
     )
 
     # Optionally persist to ledger

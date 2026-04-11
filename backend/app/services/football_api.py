@@ -11,6 +11,10 @@ from app.config import settings
 
 BASE_URL = "https://api.football-data.org/v4"
 
+# Rate limiting — free tier: 10 req/min → enforce min 6.5s gap between requests
+_rate_lock = asyncio.Lock()
+_last_request_time: float = 0.0
+
 # All priority leagues — codes mapped to display names
 SUPPORTED_COMPETITIONS = {
     "PL":  "Premier League",
@@ -36,11 +40,22 @@ def _headers() -> dict:
 
 
 async def _get(url: str, params: Optional[dict] = None) -> dict:
-    """Make a rate-limit-safe GET request (max 10 req/min on free tier)."""
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(url, headers=_headers(), params=params)
-        resp.raise_for_status()
-        return resp.json()
+    """Rate-limited GET — enforces 6.5s minimum gap to stay within 10 req/min free tier."""
+    global _last_request_time
+    async with _rate_lock:
+        now = asyncio.get_event_loop().time()
+        wait = max(0.0, 6.5 - (now - _last_request_time))
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_request_time = asyncio.get_event_loop().time()
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(url, headers=_headers(), params=params)
+            if resp.status_code == 429:
+                await asyncio.sleep(60)
+                resp = await client.get(url, headers=_headers(), params=params)
+            resp.raise_for_status()
+            return resp.json()
 
 
 async def get_upcoming_matches(competition_code: str = "PL", days_ahead: int = 7) -> list[dict]:

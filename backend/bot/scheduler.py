@@ -25,11 +25,13 @@ from app.services.evaluator import (
     evaluate_recent_predictions,
     get_accuracy_stats,
 )
+import os
 from app.services.scraper import bulk_download_historical
 from app.services.football_api import get_all_today_matches, FDORG_COMPETITIONS
 from bot.formatter import (
     format_daily_briefing,
     format_weekly_report,
+    format_saved_tips_report,
 )
 
 log = logging.getLogger(__name__)
@@ -171,11 +173,70 @@ async def task_weekly_retrain(context) -> None:
         await _send(context.bot, f"❌ Weekly retrain failed: {e}")
 
 
+async def task_nightly_tips_report(context) -> None:
+    """23:00 — Send result of user-saved tips, then delete them from the list."""
+    log.info("[scheduler] Sending nightly tips report…")
+    try:
+        import json
+        saved_path  = os.path.join(settings.data_dir, "saved_tips.json")
+        ledger_path = os.path.join(settings.data_dir, "predictions.json")
+
+        if not os.path.exists(saved_path):
+            return
+
+        with open(saved_path) as f:
+            all_tips = json.load(f)
+
+        if not all_tips:
+            return
+
+        # Load ledger to look up settled results
+        ledger: list[dict] = []
+        if os.path.exists(ledger_path):
+            with open(ledger_path) as f:
+                ledger = json.load(f)
+
+        ledger_by_id = {e["match_id"]: e for e in ledger}
+
+        # Enrich each tip with its result (settled or still pending)
+        enriched = []
+        for tip in all_tips:
+            mid   = tip.get("match_id")
+            entry = ledger_by_id.get(mid, {})
+            actual = entry.get("actual")
+            enriched.append({
+                **tip,
+                "actual":  actual,
+                "correct": entry.get("correct", {}),
+                "settled": actual is not None,
+            })
+
+        text = format_saved_tips_report(enriched)
+        await _send(context.bot, text)
+
+        # Delete all tips that have been settled — unsettled ones stay for tomorrow
+        remaining = [
+            tip for tip, enr in zip(all_tips, enriched)
+            if not enr["settled"]
+        ]
+        with open(saved_path, "w") as f:
+            json.dump(remaining, f, indent=2)
+
+        settled_count = len(enriched) - len(remaining)
+        log.info(
+            f"[scheduler] Nightly tips report sent. "
+            f"{settled_count} deleted, {len(remaining)} carried forward."
+        )
+
+    except Exception as e:
+        log.error(f"[scheduler] Nightly tips report failed: {e}")
+
+
 async def task_weekly_report(context) -> None:
     """Sunday 09:00 — Send the weekly performance report."""
     log.info("[scheduler] Sending weekly report…")
     try:
-        import json, os
+        import json
         from bot.formatter import format_weekly_report
         from ml.train import get_last_training_summary
 
@@ -186,6 +247,15 @@ async def task_weekly_report(context) -> None:
         summary = get_last_training_summary()
         text = format_weekly_report(acc7, bets, summary)
         await _send(context.bot, text)
+
+        # Alert if 7-day accuracy is below 30% (with enough data)
+        if acc7.get("total", 0) >= 10 and acc7.get("result_accuracy", 1.0) < 0.30:
+            acc_pct = f"{acc7['result_accuracy']:.0%}"
+            await _send(
+                context.bot,
+                f"⚠️ *Model alert*: 7\\-day accuracy is {acc_pct} \\(below 30%\\)\\. "
+                "Consider running /retrain\\.",
+            )
     except Exception as e:
         log.error(f"[scheduler] Weekly report failed: {e}")
 
@@ -233,6 +303,13 @@ def register_jobs(app: Application) -> None:
         interval=datetime.timedelta(hours=1),
         first=datetime.timedelta(minutes=15),
         name="evaluate_predictions",
+    )
+
+    # Nightly tips report — 23:00 BST every day
+    jq.run_daily(
+        task_nightly_tips_report,
+        time=datetime.time(23, 0, tzinfo=TZ),
+        name="nightly_tips_report",
     )
 
     # Weekly retrain — Sunday 03:00 BST

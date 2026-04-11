@@ -27,7 +27,7 @@ from app.services.football_api import (
     FDORG_COMPETITIONS,
 )
 from app.services.prediction_service import predict_match, predict_upcoming_batch
-from app.services.evaluator import get_accuracy_stats
+from app.services.evaluator import get_accuracy_stats, get_accuracy_by_league
 from ml.train import get_last_training_summary
 from bot.formatter import (
     format_daily_briefing,
@@ -39,9 +39,12 @@ from bot.formatter import (
     format_pnl,
     format_accuracy,
     format_backtest,
+    format_saved_tips_list,
 )
 
-BETS_PATH = os.path.join(settings.data_dir, "bets.json")
+BETS_PATH       = os.path.join(settings.data_dir, "bets.json")
+SAVED_TIPS_PATH = os.path.join(settings.data_dir, "saved_tips.json")
+LEDGER_PATH     = os.path.join(settings.data_dir, "predictions.json")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -496,6 +499,188 @@ async def cmd_leagues(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _reply(update, "\n".join(lines))
 
 
+async def cmd_leaguestats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/leaguestats — Accuracy breakdown by league."""
+    stats = get_accuracy_by_league()
+    if not stats:
+        await _reply(update, "_No settled predictions yet\\._")
+        return
+
+    lines = ["*📊 Accuracy by League*", ""]
+    for league, s in stats.items():
+        acc = f"{s['accuracy']:.0%}"
+        lines.append(f"  *{_esc_cmd(league)}* — {s['correct']}/{s['total']} \\({_esc_cmd(acc)}\\)")
+
+    await _reply(update, "\n".join(lines))
+
+
+def _esc_cmd(text: str) -> str:
+    """Minimal MarkdownV2 escape for inline use."""
+    import re as _re
+    return _re.sub(r"([_*\[\]()~`>#+=|{}.!\\-])", r"\\\1", str(text))
+
+
+# ── Saved Tips helpers ─────────────────────────────────────────────────────────
+
+def _load_saved_tips() -> list[dict]:
+    if not os.path.exists(SAVED_TIPS_PATH):
+        return []
+    try:
+        with open(SAVED_TIPS_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_saved_tips(tips: list[dict]) -> None:
+    os.makedirs(os.path.dirname(SAVED_TIPS_PATH), exist_ok=True)
+    with open(SAVED_TIPS_PATH, "w") as f:
+        json.dump(tips, f, indent=2)
+
+
+def _load_ledger() -> list[dict]:
+    if not os.path.exists(LEDGER_PATH):
+        return []
+    try:
+        with open(LEDGER_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _extract_vs_pairs(text: str) -> list[tuple[str, str]]:
+    """
+    Extract (home, away) team name pairs from a bot message's plain text.
+    Operates line-by-line so team names never span across newlines.
+    Matches "Arsenal vs Chelsea" and "Arsenal vs Chelsea · League" patterns.
+    """
+    # Uses [ \t] not \s so matches stay on one line
+    pattern = re.compile(
+        r'([A-Z][\w\'\.&](?:[\w\'\.& -]*[\w\'\.&])?)'  # home team
+        r'[ \t]+vs[ \t]+'
+        r'([A-Z][\w\'\.&](?:[\w\'\.& -]*[\w\'\.&])?)'  # away team
+        r'(?=[ \t]*[·|\n]|[ \t]*$)',
+    )
+    pairs = []
+    seen = set()
+    for line in text.splitlines():
+        for m in pattern.finditer(line):
+            home = m.group(1).strip()
+            away = m.group(2).strip()
+            key = (home.lower(), away.lower())
+            if 3 <= len(home) <= 40 and 3 <= len(away) <= 40 and key not in seen:
+                pairs.append((home, away))
+                seen.add(key)
+    return pairs
+
+
+def _find_prediction(home_query: str, away_query: str) -> Optional[dict]:
+    """Search the prediction ledger for the most recent matching entry."""
+    ledger = _load_ledger()
+    if not ledger:
+        return None
+
+    hq = home_query.lower()
+    aq = away_query.lower()
+
+    candidates = []
+    for entry in ledger:
+        h = entry.get("home", "").lower()
+        a = entry.get("away", "").lower()
+        h_match = any(w in h for w in hq.split() if len(w) >= 3)
+        a_match = any(w in a for w in aq.split() if len(w) >= 3)
+        if h_match and a_match:
+            candidates.append(entry)
+
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda e: e.get("logged_at", ""), reverse=True)[0]
+
+
+def _pin_prediction(entry: dict) -> bool:
+    """
+    Add a ledger entry to saved_tips.json.
+    Returns True if added, False if already present.
+    """
+    tips = _load_saved_tips()
+    if any(t.get("match_id") == entry["match_id"] for t in tips):
+        return False
+    tips.append({
+        "match_id":    entry["match_id"],
+        "saved_at":    datetime.utcnow().isoformat(),
+        "date":        entry.get("date", ""),
+        "home":        entry.get("home", ""),
+        "away":        entry.get("away", ""),
+        "competition": entry.get("league", ""),
+        "prediction":  entry.get("prediction", {}),
+    })
+    _save_saved_tips(tips)
+    return True
+
+
+async def handle_save_prediction(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Reply handler — triggered when the user replies to any bot message with
+    text containing "save prediction" (case insensitive).
+
+    Parses all "X vs Y" pairs from the replied-to message and pins each
+    matching prediction for the 23:00 nightly report.
+    """
+    replied = update.message.reply_to_message
+    if not replied or not replied.text:
+        await _reply(update, "❌ Reply to a prediction message to save it\\.")
+        return
+
+    pairs = _extract_vs_pairs(replied.text)
+    if not pairs:
+        await _reply(update, "❌ Couldn't find any matches in that message\\.")
+        return
+
+    saved_names = []
+    already_names = []
+    not_found_names = []
+
+    for home_q, away_q in pairs:
+        entry = _find_prediction(home_q, away_q)
+        if not entry:
+            not_found_names.append(f"{home_q} vs {away_q}")
+            continue
+        added = _pin_prediction(entry)
+        label = f"{entry['home']} vs {entry['away']}"
+        if added:
+            pred   = entry.get("prediction", {})
+            result = (pred.get("result") or "?").title()
+            conf   = f"{pred.get('confidence', 0):.0%}"
+            saved_names.append((label, result, conf))
+        else:
+            already_names.append(label)
+
+    lines = []
+    for label, result, conf in saved_names:
+        lines.append(
+            f"📌 *{_esc_cmd(label)}*  →  {_esc_cmd(result)} \\({_esc_cmd(conf)}\\)"
+        )
+    for label in already_names:
+        lines.append(f"ℹ️ Already saved: {_esc_cmd(label)}")
+    for label in not_found_names:
+        lines.append(f"⚠️ Not in ledger: {_esc_cmd(label)}")
+
+    if saved_names:
+        lines.append("")
+        lines.append("_Results at 23:00 BST\\._")
+
+    if lines:
+        await _reply(update, "\n".join(lines))
+    else:
+        await _reply(update, "❌ No predictions found to save\\.")
+
+
+async def cmd_saved(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/saved — Show your currently saved predictions."""
+    tips = _load_saved_tips()
+    await _reply(update, format_saved_tips_list(tips))
+
+
 async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/backtest — Simulate historical staking on FDCO data."""
     await update.message.reply_text("⏳ Running backtest on historical data…")
@@ -527,8 +712,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /settle 3 won — Settle bet \\#3\n"
         "  /bets — Active bets\n"
         "  /pnl — Profit \\& loss summary\n\n"
+        "*Saved Tips*\n"
+        "  Reply to any prediction with \"save prediction\" — Pin it for 23:00 review\n"
+        "  /saved — Show your pinned predictions\n\n"
         "*Model*\n"
         "  /accuracy — Accuracy \\+ log\\-loss \\+ Brier score\n"
+        "  /leaguestats — Accuracy breakdown by league\n"
         "  /backtest — Simulate historical staking \\(FDCO data\\)\n"
         "  /retrain — Force model retrain \\(admin\\)\n"
         "  /leagues — Tracked leagues list\n"

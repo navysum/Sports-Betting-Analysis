@@ -75,6 +75,9 @@ def settle_prediction(match_id: str, actual: dict) -> Optional[dict]:
                 "btts": pred.get("btts_predicted") == actual.get("btts"),
             }
 
+            # Tag whether entry had a value bet flagged (for ROI tracking)
+            entry["had_value_bet"] = bool(pred.get("value_bets"))
+
             # Auto post-mortem
             entry["post_mortem"] = _generate_post_mortem(entry, pred, actual)
             break
@@ -271,6 +274,62 @@ def get_accuracy_stats(days: Optional[int] = None) -> dict:
         "log_loss":    _log_loss(settled),
         "brier_score": _brier_score(settled),
         "window_days": days,
+    }
+
+
+def get_accuracy_by_league(days: Optional[int] = None) -> dict:
+    """
+    Break down result accuracy by league.
+    Returns dict of {league: {total, correct, accuracy}} sorted by volume.
+    """
+    ledger = _load_ledger()
+    settled = [e for e in ledger if e.get("actual") is not None]
+
+    if days:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        settled = [e for e in settled if e.get("date", "0") >= cutoff]
+
+    leagues: dict[str, dict] = {}
+    for e in settled:
+        league = e.get("league", "Unknown")
+        if league not in leagues:
+            leagues[league] = {"total": 0, "correct": 0}
+        leagues[league]["total"] += 1
+        if e.get("correct", {}).get("result"):
+            leagues[league]["correct"] += 1
+
+    return {
+        league: {
+            **stats,
+            "accuracy": round(stats["correct"] / stats["total"], 3) if stats["total"] else 0.0,
+        }
+        for league, stats in sorted(leagues.items(), key=lambda x: -x[1]["total"])
+    }
+
+
+def get_value_bet_roi(days: Optional[int] = None) -> dict:
+    """
+    Strike rate for matches where the model flagged a value bet.
+    Returns {bets, wins, strike_rate} or {bets: 0} if no data.
+    """
+    ledger = _load_ledger()
+    settled = [
+        e for e in ledger
+        if e.get("actual") is not None and e.get("had_value_bet")
+    ]
+
+    if days:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        settled = [e for e in settled if e.get("date", "0") >= cutoff]
+
+    if not settled:
+        return {"bets": 0, "wins": 0, "strike_rate": None}
+
+    wins = sum(1 for e in settled if e.get("correct", {}).get("result"))
+    return {
+        "bets": len(settled),
+        "wins": wins,
+        "strike_rate": round(wins / len(settled), 3),
     }
 
 

@@ -18,6 +18,9 @@ Competition code → Odds API sport key mapping:
 """
 import asyncio
 import httpx
+import json
+import os
+import time
 from typing import Optional
 from app.config import settings
 
@@ -38,6 +41,27 @@ SPORT_MAP = {
 # Requests remaining counter (updated from response headers)
 _requests_remaining: Optional[int] = None
 
+# Cache config — 6 hours to stretch 500 req/month budget
+ODDS_CACHE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "data", "odds_cache.json"
+)
+CACHE_TTL = 6 * 3600  # 6 hours
+
+
+def _load_odds_cache() -> dict:
+    try:
+        with open(ODDS_CACHE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_odds_cache(cache: dict):
+    os.makedirs(os.path.dirname(ODDS_CACHE_PATH), exist_ok=True)
+    with open(ODDS_CACHE_PATH, "w") as f:
+        json.dump(cache, f)
+
 
 async def get_odds_for_competition(competition_code: str, region: str = "uk") -> list[dict]:
     """
@@ -54,6 +78,7 @@ async def get_odds_for_competition(competition_code: str, region: str = "uk") ->
         ...
     ]
     Returns [] if no API key is configured or on error.
+    Cached for 6 hours to preserve the 500 req/month free tier budget.
     """
     global _requests_remaining
 
@@ -63,6 +88,13 @@ async def get_odds_for_competition(competition_code: str, region: str = "uk") ->
     sport = SPORT_MAP.get(competition_code)
     if not sport:
         return []
+
+    # Check cache first
+    cache = _load_odds_cache()
+    cache_key = f"{competition_code}_{region}"
+    cached = cache.get(cache_key)
+    if cached and time.time() - cached.get("ts", 0) < CACHE_TTL:
+        return cached["data"]
 
     params = {
         "apiKey": settings.odds_api_key,
@@ -86,7 +118,7 @@ async def get_odds_for_competition(competition_code: str, region: str = "uk") ->
         home = event.get("home_team", "")
         away = event.get("away_team", "")
         commence = event.get("commence_time", "")
-        odds = _extract_best_odds(event.get("bookmakers", []))
+        odds = _extract_best_odds(event.get("bookmakers", []), home, away)
         if odds:
             results.append({
                 "home_team": home,
@@ -95,13 +127,22 @@ async def get_odds_for_competition(competition_code: str, region: str = "uk") ->
                 "odds": odds,
             })
 
+    # Cache the results
+    cache[cache_key] = {"data": results, "ts": time.time()}
+    _save_odds_cache(cache)
+
     return results
 
 
-def _extract_best_odds(bookmakers: list[dict]) -> Optional[dict]:
+def _extract_best_odds(
+    bookmakers: list[dict],
+    home_team: str = "",
+    away_team: str = "",
+) -> Optional[dict]:
     """
     Take the best (highest) odds across all bookmakers for each outcome.
-    Higher odds = better value for the bettor.
+    Uses team names to correctly assign home/draw/away — The Odds API labels
+    outcomes by team name, not position, so position-based assignment was wrong.
     """
     best = {"home": None, "draw": None, "away": None}
 
@@ -119,19 +160,16 @@ def _extract_best_odds(bookmakers: list[dict]) -> Optional[dict]:
                 if price is None:
                     continue
 
-                # Map outcome name → home/draw/away based on position
-                # The Odds API labels outcomes by team name, not home/away
-                # We store them by position in the outcomes list
-                if len(outcomes) == 3:
-                    # h2h with draw
-                    if outcome == outcomes[0]:
-                        key = "home"
-                    elif outcome == outcomes[1]:
-                        key = "draw"
-                    else:
-                        key = "away"
+                # Match by name: "Draw" is literal, teams matched by name
+                name_lower = name.lower()
+                if name_lower == "draw":
+                    key = "draw"
+                elif home_team and _fuzzy_match(name_lower, home_team.lower()):
+                    key = "home"
+                elif away_team and _fuzzy_match(name_lower, away_team.lower()):
+                    key = "away"
                 else:
-                    continue  # No draw — skip (shouldn't happen for football)
+                    continue  # Can't reliably identify this outcome
 
                 if best[key] is None or price > best[key]:
                     best[key] = price
