@@ -43,6 +43,71 @@ def _fmt_kickoff(utc_str: Optional[str]) -> str:
 # Daily Briefing
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _is_flat_prediction(pred: dict) -> bool:
+    """
+    Returns True if the model had insufficient data and returned near-uniform
+    probabilities (all three outcomes within 8pp of each other).
+    These are not useful predictions and should be hidden.
+    """
+    h = pred.get("home_win_prob", 0)
+    d = pred.get("draw_prob", 0)
+    a = pred.get("away_win_prob", 0)
+    spread = max(h, d, a) - min(h, d, a)
+    return spread < 0.08
+
+
+def _fmt_value_bets(value_bets: list[str]) -> str:
+    """Compact value bet display: 'Home Win +8%' instead of the full verbose string."""
+    out = []
+    for vb in value_bets[:3]:
+        # Parse "Home Win (model 48% vs implied 20%)" → "Home Win +28%"
+        try:
+            label = vb.split("(")[0].strip()
+            import re
+            nums = re.findall(r"(\d+)%", vb)
+            if len(nums) >= 2:
+                edge = int(nums[0]) - int(nums[1])
+                out.append(f"{label} \\+{edge}%")
+            else:
+                out.append(_esc(label))
+        except Exception:
+            out.append(_esc(vb[:30]))
+    return " \\| ".join(out)
+
+
+def _fmt_match_block(item: dict, show_comp: bool = True) -> list[str]:
+    """Format a single match as a compact block of lines."""
+    pred = item.get("prediction", {})
+    home = _esc(item.get("home_team", "?"))
+    away = _esc(item.get("away_team", "?"))
+    ko   = _fmt_kickoff(item.get("match_date"))
+    comp = _esc(item.get("competition", ""))
+
+    outcome = pred.get("predicted_outcome", "?")
+    stars   = STAR_MAP.get(pred.get("stars", 1), "")
+    emoji   = OUTCOME_EMOJI.get(outcome, "")
+    conf    = _pct(pred.get("confidence"))
+    o25     = _pct(pred.get("over25_prob"))
+    btts    = _pct(pred.get("btts_prob"))
+
+    hp = _pct(pred.get("home_win_prob"))
+    dp = _pct(pred.get("draw_prob"))
+    ap = _pct(pred.get("away_win_prob"))
+
+    comp_str = f" · {comp}" if show_comp and comp else ""
+    lines = [
+        f"*{home} vs {away}*{comp_str} · `{ko}`",
+        f"{emoji} *{_esc(outcome.title())}* {stars} {conf}  \\|  H:{hp} D:{dp} A:{ap}",
+        f"O2\\.5: {o25}  \\|  BTTS: {btts}",
+    ]
+
+    vbs = pred.get("value_bets", [])
+    if vbs:
+        lines.append(f"💰 {_fmt_value_bets(vbs)}")
+
+    return lines
+
+
 def format_daily_briefing(
     predictions: list[dict],
     label: str = "Today",
@@ -54,45 +119,55 @@ def format_daily_briefing(
     if not predictions:
         return f"*{_esc(label)}'s Fixtures*\n\n_{_esc(date_str)}_\n\nNo matches found for tracked leagues\\."
 
-    lines = [f"*⚽ {_esc(label)}'s Fixtures \\& Predictions*", f"_{_esc(date_str)}_", ""]
+    # Filter out flat/no-data predictions and sort by confidence descending
+    valid = [p for p in predictions if not _is_flat_prediction(p.get("prediction", {}))]
+    flat  = [p for p in predictions if _is_flat_prediction(p.get("prediction", {}))]
+    valid.sort(key=lambda p: p.get("prediction", {}).get("confidence", 0), reverse=True)
 
-    by_comp: dict[str, list] = {}
-    for item in predictions:
-        comp = item.get("competition", "Unknown")
-        by_comp.setdefault(comp, []).append(item)
+    lines = [
+        f"*⚽ {_esc(label)}'s Predictions*",
+        f"_{_esc(date_str)}_",
+        "",
+    ]
 
-    for comp, items in by_comp.items():
-        lines.append(f"*{_esc(comp)}*")
-        for item in items:
-            pred = item.get("prediction", {})
-            home = _esc(item.get("home_team", "?"))
-            away = _esc(item.get("away_team", "?"))
-            ko   = _fmt_kickoff(item.get("match_date"))
-            outcome = pred.get("predicted_outcome", "?")
-            stars  = STAR_MAP.get(pred.get("stars", 1), "")
-            emoji  = OUTCOME_EMOJI.get(outcome, "")
-            conf   = _pct(pred.get("confidence"))
-            o25    = _pct(pred.get("over25_prob"))
-            btts   = _pct(pred.get("btts_prob"))
-
-            lines.append(
-                f"  `{ko}` {home} vs {away}"
-            )
-            lines.append(
-                f"  {emoji} {_esc(outcome.title())} {stars} \\({conf}\\)"
-            )
-            lines.append(
-                f"  O2\\.5: {o25} \\| BTTS: {btts}"
-            )
-
-            # Value bets
-            vbs = pred.get("value_bets", [])
-            if vbs:
-                lines.append(f"  💰 Value: {_esc(', '.join(vbs[:2]))}")
-
+    # ── Strong picks (4–5 stars, ≥60% confidence) ──────────────────────────
+    strong = [p for p in valid if p.get("prediction", {}).get("stars", 0) >= 4]
+    if strong:
+        lines.append("*🔥 Strong Picks*")
+        lines.append("─────────────────")
+        for item in strong:
+            lines += _fmt_match_block(item, show_comp=True)
             lines.append("")
 
-    lines.append("_Predictions are probabilistic — bet responsibly\\._")
+    # ── Moderate picks (3 stars, 50–59%) ────────────────────────────────────
+    moderate = [p for p in valid if p.get("prediction", {}).get("stars", 0) == 3]
+    if moderate:
+        lines.append("*✅ Moderate Picks*")
+        lines.append("─────────────────")
+        for item in moderate:
+            lines += _fmt_match_block(item, show_comp=True)
+            lines.append("")
+
+    # ── Low confidence (1–2 stars, <50%) ────────────────────────────────────
+    low = [p for p in valid if p.get("prediction", {}).get("stars", 0) <= 2]
+    if low:
+        lines.append("*📋 Other Fixtures*")
+        lines.append("─────────────────")
+        for item in low:
+            lines += _fmt_match_block(item, show_comp=True)
+            lines.append("")
+
+    # ── Matches with insufficient data ──────────────────────────────────────
+    if flat:
+        team_list = ", ".join(
+            _esc(f"{p.get('home_team','?')} vs {p.get('away_team','?')}")
+            for p in flat[:6]
+        )
+        more = f" \\+{len(flat)-6} more" if len(flat) > 6 else ""
+        lines.append(f"_⚠️ {len(flat)} matches skipped \\(insufficient historical data\\): {team_list}{more}_")
+        lines.append("")
+
+    lines.append("_Predictions sorted by confidence — bet responsibly\\._")
     return "\n".join(lines)
 
 
