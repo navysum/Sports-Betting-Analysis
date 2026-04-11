@@ -1,16 +1,21 @@
 """
 Feature engineering for match outcome, over/under, and BTTS prediction.
 
-Feature vector (28 features):
+Feature vector (30 features):
   Form (6):        home_form5, home_form10, away_form5, away_form10, form_diff, form_momentum
   Goals (8):       home_gf, home_ga, away_gf, away_ga, home_gf_home, home_ga_home,
                    away_gf_away, away_ga_away
   H2H (3):         h2h_home_rate, h2h_draw_rate, h2h_away_rate
   Standing (5):    home_pos, away_pos, home_ppg, away_ppg, pos_diff
   Derived (4):     ppg_diff, total_goals_avg, goal_diff_avg, clean_sheet_rate
-  xG (2):          home_xg_for, away_xg_for   (0.0 if unavailable — model handles gracefully)
+  Rest (2):        home_days_rest, away_days_rest
+  xG (2):          home_xg_for, away_xg_for   (0.0 if unavailable)
+
+form5/form10 are exponentially weighted (recent matches count more).
 """
+import math
 import numpy as np
+from datetime import date
 from typing import Optional
 
 
@@ -47,13 +52,25 @@ def _goals_for_against(matches: list[dict], team_id: int) -> tuple[float, float]
 
 
 def _form_points(matches: list[dict], team_id: int, n: int = 5) -> float:
+    """Exponentially weighted form — recent matches count more (decay=0.85)."""
     recent = [m for m in matches if m.get("status") == "FINISHED"][-n:]
-    pts = sum(3 if _result_for_team(m, team_id) == "W" else (1 if _result_for_team(m, team_id) == "D" else 0) for m in recent)
-    return pts / max(len(recent), 1)
+    if not recent:
+        return 0.0
+    decay = 0.85
+    total_weight = 0.0
+    weighted_pts = 0.0
+    for i, m in enumerate(recent):
+        # earlier matches have lower weight
+        w = decay ** (len(recent) - 1 - i)
+        r = _result_for_team(m, team_id)
+        pts = 3 if r == "W" else (1 if r == "D" else 0)
+        weighted_pts += w * pts
+        total_weight += w
+    return weighted_pts / total_weight if total_weight else 0.0
 
 
 def _form_momentum(matches: list[dict], team_id: int) -> float:
-    """Difference in form points: last 3 minus previous 3."""
+    """Difference in weighted form: last 3 minus previous 3."""
     finished = [m for m in matches if m.get("status") == "FINISHED"]
     last3 = _form_points(finished[-3:], team_id, 3) if len(finished) >= 3 else 0.0
     prev3 = _form_points(finished[-6:-3], team_id, 3) if len(finished) >= 6 else 0.0
@@ -91,6 +108,23 @@ def _h2h_stats(h2h_matches: list[dict], home_id: int, away_id: int) -> tuple[flo
     return results.count("H") / n, results.count("D") / n, results.count("A") / n
 
 
+def _days_since_last_match(matches: list[dict], ref_date: Optional[str]) -> float:
+    """Days between ref_date and the team's most recent finished match. Capped at 21."""
+    if not ref_date:
+        return 7.0
+    finished = [m for m in matches if m.get("status") == "FINISHED" and m.get("utcDate")]
+    if not finished:
+        return 7.0
+    try:
+        last_date_str = max(m["utcDate"][:10] for m in finished)
+        d1 = date.fromisoformat(ref_date[:10])
+        d2 = date.fromisoformat(last_date_str)
+        days = (d1 - d2).days
+        return float(min(max(days, 1), 21))
+    except Exception:
+        return 7.0
+
+
 def build_feature_vector(
     home_id: int,
     away_id: int,
@@ -101,12 +135,13 @@ def build_feature_vector(
     away_standing: Optional[dict] = None,
     home_xg: float = 0.0,
     away_xg: float = 0.0,
+    match_date: Optional[str] = None,
 ) -> np.ndarray:
     """
-    Returns a 1-D float32 numpy feature vector.
+    Returns a 1-D float32 numpy feature vector (30 features).
     Feature order MUST stay consistent with training — do not reorder.
     """
-    # --- Form ---
+    # --- Form (exponentially weighted) ---
     hf5  = _form_points(home_matches, home_id, 5)
     hf10 = _form_points(home_matches, home_id, 10)
     af5  = _form_points(away_matches, away_id, 5)
@@ -137,11 +172,15 @@ def build_feature_vector(
     away_ppg = _ppg(away_standing)
 
     # --- Derived ---
-    pos_diff       = home_pos - away_pos
-    ppg_diff       = home_ppg - away_ppg
-    total_goals    = home_gf + away_ga
-    goal_diff_avg  = home_gf - home_ga
-    cs_rate        = _clean_sheet_rate(home_matches, home_id)
+    pos_diff      = home_pos - away_pos
+    ppg_diff      = home_ppg - away_ppg
+    total_goals   = home_gf + away_ga
+    goal_diff_avg = home_gf - home_ga
+    cs_rate       = _clean_sheet_rate(home_matches, home_id)
+
+    # --- Rest / fatigue ---
+    home_days_rest = _days_since_last_match(home_matches, match_date)
+    away_days_rest = _days_since_last_match(away_matches, match_date)
 
     return np.array([
         # Form (6)
@@ -155,6 +194,8 @@ def build_feature_vector(
         home_pos, away_pos, home_ppg, away_ppg, pos_diff,
         # Derived (4)
         ppg_diff, total_goals, goal_diff_avg, cs_rate,
+        # Rest (2)
+        home_days_rest, away_days_rest,
         # xG (2)
         home_xg, away_xg,
     ], dtype=np.float32)
@@ -173,8 +214,10 @@ FEATURE_NAMES = [
     "home_position", "away_position", "home_ppg", "away_ppg", "pos_diff",
     # Derived
     "ppg_diff", "total_goals_avg", "goal_diff_avg", "clean_sheet_rate",
+    # Rest
+    "home_days_rest", "away_days_rest",
     # xG
     "home_xg_for", "away_xg_for",
 ]
 
-N_FEATURES = len(FEATURE_NAMES)  # 28
+N_FEATURES = len(FEATURE_NAMES)  # 30

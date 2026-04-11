@@ -38,6 +38,7 @@ from bot.formatter import (
     format_bet_log,
     format_pnl,
     format_accuracy,
+    format_backtest,
 )
 
 BETS_PATH = os.path.join(settings.data_dir, "bets.json")
@@ -481,6 +482,18 @@ async def cmd_leagues(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _reply(update, "\n".join(lines))
 
 
+async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/backtest — Simulate historical staking on FDCO data."""
+    await update.message.reply_text("⏳ Running backtest on historical data…")
+    try:
+        from ml.backtest import run_backtest
+        result = run_backtest()
+        text = format_backtest(result)
+    except Exception as e:
+        text = f"❌ Backtest failed: {e}"
+    await _reply(update, text)
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/help — Command reference."""
     text = (
@@ -502,6 +515,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /pnl — Profit \\& loss summary\n\n"
         "*Model*\n"
         "  /accuracy — Model accuracy stats\n"
+        "  /backtest — Simulate historical staking \\(FDCO data\\)\n"
         "  /retrain — Force model retrain \\(admin\\)\n"
         "  /leagues — Tracked leagues list\n"
         "  /help — This message"

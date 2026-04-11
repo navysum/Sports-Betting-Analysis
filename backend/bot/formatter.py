@@ -330,6 +330,45 @@ def format_accuracy(stats_7d: dict, stats_30d: dict, stats_all: dict) -> str:
 # Weekly Report
 # ──────────────────────────────────────────────────────────────────────────────
 
+def format_backtest(result: dict) -> str:
+    if "error" in result:
+        return f"❌ {_esc(result['error'])}"
+
+    flat   = result.get("flat", {})
+    value  = result.get("value", {})
+    kelly  = result.get("kelly", {})
+    total  = result.get("total_matches", 0)
+
+    def _pnl_str(pnl: float) -> str:
+        sign = "\\+" if pnl >= 0 else ""
+        return f"{sign}£{pnl:.2f}"
+
+    def _roi_str(roi: float) -> str:
+        sign = "\\+" if roi >= 0 else ""
+        return f"{sign}{roi:.1f}%"
+
+    lines = [
+        "*📊 Historical Backtest \\(FDCO Data\\)*",
+        f"_{total} matches analysed_",
+        "",
+        "*Flat staking \\(£1/match on predicted outcome\\)*",
+        f"  Bets: {flat.get('bets', 0)} \\| Wins: {flat.get('wins', 0)} \\({flat.get('win_rate', 0):.1f}%\\)",
+        f"  P&L: {_pnl_str(flat.get('pnl', 0))} \\| ROI: {_roi_str(flat.get('roi', 0))}",
+        "",
+        f"*Value staking \\(edge ≥ {value.get('min_edge_pct', 3)}%, £1/bet\\)*",
+        f"  Bets: {value.get('bets', 0)} \\| Wins: {value.get('wins', 0)} \\({value.get('win_rate', 0):.1f}%\\)",
+        f"  P&L: {_pnl_str(value.get('pnl', 0))} \\| ROI: {_roi_str(value.get('roi', 0))}",
+        "",
+        f"*Kelly staking \\({int(kelly.get('fraction', 0.25)*100)}% Kelly on value bets\\)*",
+        f"  Bets: {kelly.get('bets', 0)} \\| Wins: {kelly.get('wins', 0)} \\({kelly.get('win_rate', 0):.1f}%\\)",
+        f"  Bankroll: £{kelly.get('starting_bankroll', 100):.0f} → £{kelly.get('final_bankroll', 0):.2f}",
+        f"  Max drawdown: {kelly.get('max_drawdown_pct', 0):.1f}%",
+        "",
+        "_Backtest uses in\\-sample data — live performance may differ\\._",
+    ]
+    return "\n".join(lines)
+
+
 def format_weekly_report(
     accuracy_7d: dict,
     bets: list[dict],
