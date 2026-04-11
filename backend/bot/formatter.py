@@ -219,11 +219,11 @@ def format_match_analysis(
         )
     correct_scores = prediction.get("correct_scores", [])
     if correct_scores:
-        top = "  ".join(
-            f"`{s['score']}` {_esc(f'{s[\"prob\"]:.0%}')}"
-            for s in correct_scores[:4]
-        )
-        lines.append(f"*🎯 Likely Scores:* {top}")
+        top_parts = []
+        for s in correct_scores[:4]:
+            pct = _esc(f"{s['prob']:.0%}")
+            top_parts.append(f"`{s['score']}` {pct}")
+        lines.append(f"*🎯 Likely Scores:* {'  '.join(top_parts)}")
 
     lines += [
         "",
