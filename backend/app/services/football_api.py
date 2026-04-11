@@ -72,11 +72,13 @@ async def get_tomorrow_matches(competition_code: str = "PL") -> list[dict]:
 
 
 async def get_finished_matches(competition_code: str = "PL", limit: int = 100) -> list[dict]:
+    # football-data.org v4 does not accept a 'limit' param — returns full season, we slice
     data = await _get(
         f"{BASE_URL}/competitions/{competition_code}/matches",
-        {"status": "FINISHED", "limit": limit},
+        {"status": "FINISHED"},
     )
-    return data.get("matches", [])
+    matches = data.get("matches", [])
+    return matches[-limit:] if limit else matches
 
 
 async def get_live_matches(competition_code: str = "PL") -> list[dict]:
