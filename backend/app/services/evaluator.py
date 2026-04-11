@@ -225,13 +225,50 @@ def _brier_score(settled: list[dict]) -> Optional[float]:
     return round(bs_sum / count, 4) if count else None
 
 
+def _value_bet_stats(settled: list[dict]) -> dict:
+    """
+    ROI stats for predictions that were flagged as value bets.
+    Requires value_bets field in ledger entries (added by prediction_service).
+    """
+    vb_entries = [e for e in settled if e.get("value_bets")]
+    if not vb_entries:
+        return {"count": 0, "correct": 0, "accuracy": None}
+    correct = sum(1 for e in vb_entries if e.get("correct", {}).get("result"))
+    return {
+        "count":    len(vb_entries),
+        "correct":  correct,
+        "accuracy": round(correct / len(vb_entries), 4),
+    }
+
+
+def _by_league_stats(settled: list[dict]) -> dict:
+    """Per-league result accuracy breakdown."""
+    leagues: dict[str, dict] = {}
+    for e in settled:
+        lg = e.get("league", "Unknown")
+        if lg not in leagues:
+            leagues[lg] = {"total": 0, "correct": 0}
+        leagues[lg]["total"] += 1
+        if e.get("correct", {}).get("result"):
+            leagues[lg]["correct"] += 1
+    return {
+        lg: {
+            "total":    s["total"],
+            "correct":  s["correct"],
+            "accuracy": round(s["correct"] / s["total"], 4) if s["total"] else 0.0,
+        }
+        for lg, s in sorted(leagues.items())
+    }
+
+
 def get_accuracy_stats(days: Optional[int] = None) -> dict:
     """
     Compute accuracy, log-loss, and Brier score over settled predictions,
     optionally filtered to the last N days.
 
     Returns: {total, correct_result, result_accuracy, over25_accuracy,
-              btts_accuracy, log_loss, brier_score, window_days}
+              btts_accuracy, log_loss, brier_score, window_days,
+              by_league, value_bets}
     """
     ledger = _load_ledger()
     settled = [e for e in ledger if e.get("actual") is not None]
@@ -250,6 +287,8 @@ def get_accuracy_stats(days: Optional[int] = None) -> dict:
             "log_loss":         None,
             "brier_score":      None,
             "window_days":      days,
+            "by_league":        {},
+            "value_bets":       {"count": 0, "correct": 0, "accuracy": None},
         }
 
     result_correct = [e for e in settled if e.get("correct", {}).get("result")]
@@ -271,6 +310,8 @@ def get_accuracy_stats(days: Optional[int] = None) -> dict:
         "log_loss":    _log_loss(settled),
         "brier_score": _brier_score(settled),
         "window_days": days,
+        "by_league":   _by_league_stats(settled),
+        "value_bets":  _value_bet_stats(settled),
     }
 
 
@@ -284,20 +325,22 @@ def build_ledger_entry(
     prediction: dict,
     factors_used: list[str],
     key_factors: str,
+    value_bets: Optional[list[str]] = None,
 ) -> dict:
     """Construct a fully-formed ledger entry (without actual result yet)."""
     return {
-        "match_id": match_id,
+        "match_id":     match_id,
         "api_match_id": api_match_id,
-        "date": date,
-        "league": league,
-        "home": home,
-        "away": away,
-        "prediction": prediction,
-        "actual": None,
-        "correct": None,
+        "date":         date,
+        "league":       league,
+        "home":         home,
+        "away":         away,
+        "prediction":   prediction,
+        "value_bets":   value_bets or [],
+        "actual":       None,
+        "correct":      None,
         "factors_used": factors_used,
-        "key_factors": key_factors,
-        "post_mortem": None,
-        "logged_at": datetime.utcnow().isoformat(),
+        "key_factors":  key_factors,
+        "post_mortem":  None,
+        "logged_at":    datetime.utcnow().isoformat(),
     }

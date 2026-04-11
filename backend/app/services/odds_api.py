@@ -7,6 +7,12 @@ matches so value bets can be detected automatically.
 Set ODDS_API_KEY in your .env file. If not set, the system falls back to
 no odds (value bet detection disabled).
 
+Caching:
+    Odds are cached in data/odds_cache.json keyed by {competition}:{date}.
+    Cached data is considered fresh for CACHE_TTL_HOURS hours. This prevents
+    re-fetching the same competition's odds multiple times per day and keeps
+    usage well within the 500 req/month free tier.
+
 Competition code → Odds API sport key mapping:
     PL   → soccer_epl
     PD   → soccer_spain_la_liga
@@ -17,11 +23,19 @@ Competition code → Odds API sport key mapping:
     DED  → soccer_netherlands_eredivisie
 """
 import asyncio
-import httpx
+import json
+import os
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+
+import httpx
+
 from app.config import settings
 
 BASE_URL = "https://api.the-odds-api.com/v4"
+CACHE_TTL_HOURS = 6
+
+_CACHE_PATH = os.path.join(settings.data_dir, "odds_cache.json")
 
 SPORT_MAP = {
     "PL":  "soccer_epl",
@@ -39,9 +53,47 @@ SPORT_MAP = {
 _requests_remaining: Optional[int] = None
 
 
+# ─── Cache helpers ────────────────────────────────────────────────────────────
+
+def _load_cache() -> dict:
+    if not os.path.exists(_CACHE_PATH):
+        return {}
+    try:
+        with open(_CACHE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_cache(cache: dict) -> None:
+    os.makedirs(os.path.dirname(_CACHE_PATH), exist_ok=True)
+    with open(_CACHE_PATH, "w") as f:
+        json.dump(cache, f)
+
+
+def _cache_key(competition_code: str) -> str:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return f"{competition_code}:{today}"
+
+
+def _is_fresh(entry: dict) -> bool:
+    """Return True if the cache entry was fetched within CACHE_TTL_HOURS."""
+    try:
+        fetched = datetime.fromisoformat(entry["fetched_at"])
+        age = datetime.now(timezone.utc) - fetched
+        return age < timedelta(hours=CACHE_TTL_HOURS)
+    except Exception:
+        return False
+
+
+# ─── API fetch ────────────────────────────────────────────────────────────────
+
 async def get_odds_for_competition(competition_code: str, region: str = "uk") -> list[dict]:
     """
     Fetch odds for all upcoming matches in a competition.
+
+    Returns cached data if it was fetched within CACHE_TTL_HOURS hours.
+    Otherwise fetches from The Odds API and updates the cache.
 
     Returns a list of event dicts:
     [
@@ -64,6 +116,14 @@ async def get_odds_for_competition(competition_code: str, region: str = "uk") ->
     if not sport:
         return []
 
+    key = _cache_key(competition_code)
+    cache = _load_cache()
+
+    # Return cached data if fresh
+    if key in cache and _is_fresh(cache[key]):
+        return cache[key]["events"]
+
+    # Fetch from API
     params = {
         "apiKey": settings.odds_api_key,
         "regions": region,
@@ -79,6 +139,9 @@ async def get_odds_for_competition(competition_code: str, region: str = "uk") ->
             events = resp.json()
     except Exception as e:
         print(f"[odds_api] {competition_code} fetch failed: {e}")
+        # Return stale cache if available rather than nothing
+        if key in cache:
+            return cache[key]["events"]
         return []
 
     results = []
@@ -95,6 +158,26 @@ async def get_odds_for_competition(competition_code: str, region: str = "uk") ->
                 "odds": odds,
             })
 
+    # Update cache
+    cache[key] = {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "events": results,
+    }
+    # Prune stale entries (older than 2 days) to keep file small
+    stale_keys = [
+        k for k, v in cache.items()
+        if not _is_fresh(v) and k != key
+    ]
+    for k in stale_keys:
+        try:
+            date_part = k.split(":")[1]
+            entry_date = datetime.strptime(date_part, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            if (datetime.now(timezone.utc) - entry_date).days > 2:
+                del cache[k]
+        except Exception:
+            pass
+    _save_cache(cache)
+
     return results
 
 
@@ -110,28 +193,19 @@ def _extract_best_odds(bookmakers: list[dict]) -> Optional[dict]:
             if market.get("key") != "h2h":
                 continue
             outcomes = market.get("outcomes", [])
-            if len(outcomes) < 2:
-                continue
+            if len(outcomes) < 3:
+                continue  # Need all three outcomes for football
 
-            for outcome in outcomes:
-                name = outcome.get("name", "")
+            for idx, outcome in enumerate(outcomes):
                 price = outcome.get("price")
                 if price is None:
                     continue
-
-                # Map outcome name → home/draw/away based on position
-                # The Odds API labels outcomes by team name, not home/away
-                # We store them by position in the outcomes list
-                if len(outcomes) == 3:
-                    # h2h with draw
-                    if outcome == outcomes[0]:
-                        key = "home"
-                    elif outcome == outcomes[1]:
-                        key = "draw"
-                    else:
-                        key = "away"
+                if idx == 0:
+                    key = "home"
+                elif idx == 1:
+                    key = "draw"
                 else:
-                    continue  # No draw — skip (shouldn't happen for football)
+                    key = "away"
 
                 if best[key] is None or price > best[key]:
                     best[key] = price
@@ -162,7 +236,6 @@ async def find_match_odds(
     for event in events:
         eh = event["home_team"].lower()
         ea = event["away_team"].lower()
-        # Fuzzy: check if any word from the search name appears in the event name
         if _fuzzy_match(home_lower, eh) and _fuzzy_match(away_lower, ea):
             return event["odds"]
 
@@ -174,7 +247,6 @@ def _fuzzy_match(search: str, target: str) -> bool:
     for word in search.split():
         if len(word) >= 4 and word in target:
             return True
-    # Also try whole name
     return search in target or target in search
 
 

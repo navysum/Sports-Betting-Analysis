@@ -2,14 +2,25 @@
 Client for football-data.org free API.
 Free tier: 10 req/min. Competitions: PL, CL, BL1, PD, SA, FL1, PPL, ELC, EC, WC, DED, PPL, BSA.
 Sign up at https://www.football-data.org/client/register
+
+Rate limiting:
+  Free tier allows 10 req/min (= 1 req / 6s). A module-level semaphore
+  (1 slot) plus a minimum inter-request delay of MIN_INTERVAL seconds ensures
+  concurrent callers can't exceed this limit even during batch operations.
 """
 import asyncio
+import time
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional
 from app.config import settings
 
 BASE_URL = "https://api.football-data.org/v4"
+
+# Rate limiting: 10 req/min free tier → 1 per 6s; we use 7s for safety
+_semaphore = asyncio.Semaphore(1)
+_last_request_time: float = 0.0
+MIN_INTERVAL: float = 7.0  # seconds between requests
 
 # All priority leagues — codes mapped to display names
 SUPPORTED_COMPETITIONS = {
@@ -36,11 +47,21 @@ def _headers() -> dict:
 
 
 async def _get(url: str, params: Optional[dict] = None) -> dict:
-    """Make a rate-limit-safe GET request (max 10 req/min on free tier)."""
-    async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.get(url, headers=_headers(), params=params)
-        resp.raise_for_status()
-        return resp.json()
+    """
+    Rate-limited GET request — enforces at most 1 request per MIN_INTERVAL seconds
+    globally across all concurrent callers via a semaphore.
+    """
+    global _last_request_time
+    async with _semaphore:
+        now = time.monotonic()
+        wait = MIN_INTERVAL - (now - _last_request_time)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(url, headers=_headers(), params=params)
+            resp.raise_for_status()
+            _last_request_time = time.monotonic()
+            return resp.json()
 
 
 async def get_upcoming_matches(competition_code: str = "PL", days_ahead: int = 7) -> list[dict]:
@@ -137,7 +158,6 @@ async def get_all_today_matches() -> list[dict]:
                 m["_competition_code"] = code
                 m["_competition_name"] = SUPPORTED_COMPETITIONS.get(code, code)
             results.extend(matches)
-            await asyncio.sleep(6)  # stay within 10 req/min
         except Exception:
             pass
     return results
@@ -152,7 +172,6 @@ async def get_all_tomorrow_matches() -> list[dict]:
                 m["_competition_code"] = code
                 m["_competition_name"] = SUPPORTED_COMPETITIONS.get(code, code)
             results.extend(matches)
-            await asyncio.sleep(6)
         except Exception:
             pass
     return results

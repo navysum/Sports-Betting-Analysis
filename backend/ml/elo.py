@@ -11,31 +11,113 @@ Why ELO?
   - Home advantage baked in (+100 points effective rating for home team)
   - Enables cross-league strength comparison for European fixtures
 
+Fuzzy name matching:
+  At inference time, team names from football-data.org API often differ from
+  FDCO names (e.g. "Manchester Utd" vs "Man United"). EloSystem.get_rating()
+  tries exact match first, then checks data/team_aliases.json, then falls
+  back to difflib fuzzy matching (cutoff 0.75). If no match is found, returns
+  DEFAULT_ELO (neutral) rather than silently returning 0-diff.
+
 Usage:
     from ml.elo import EloSystem, load_elo_ratings, save_elo_ratings
     elo = load_elo_ratings()
     diff = elo.get_diff("Arsenal", "Chelsea")   # home_elo - away_elo (clamped)
 """
+import difflib
 import json
 import math
 import os
 from typing import Optional
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-ELO_PATH = os.path.join(_DATA_DIR, "elo_ratings.json")
+ELO_PATH     = os.path.join(_DATA_DIR, "elo_ratings.json")
+ALIASES_PATH = os.path.join(_DATA_DIR, "team_aliases.json")
 
-DEFAULT_ELO = 1500.0
-K_FACTOR = 32.0          # Sensitivity to each result
-HOME_ADVANTAGE = 100.0   # Points added to home team's effective rating
-MAX_DIFF = 600.0         # Clamp on elo_diff feature for normalisation
+DEFAULT_ELO    = 1500.0
+K_FACTOR       = 32.0          # Sensitivity to each result
+HOME_ADVANTAGE = 100.0         # Points added to home team's effective rating
+MAX_DIFF       = 600.0         # Clamp on elo_diff feature for normalisation
+FUZZY_CUTOFF   = 0.75          # difflib similarity cutoff for name matching
+
+
+def _load_aliases() -> dict[str, str]:
+    """Load manual team name aliases from data/team_aliases.json.
+
+    Keys are the names used by football-data.org API.
+    Values are the names used in FDCO CSV data (which ELO is trained on).
+    Returns empty dict if file is absent.
+    """
+    if not os.path.exists(ALIASES_PATH):
+        return {}
+    try:
+        with open(ALIASES_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _normalise(name: str) -> str:
+    """Strip common suffixes and lowercase for comparison."""
+    return (
+        name.lower()
+        .replace(" fc", "").replace(" afc", "").replace(" cf", "")
+        .replace(" utd", " united").strip()
+    )
 
 
 class EloSystem:
     def __init__(self):
         self._ratings: dict[str, float] = {}
+        self._aliases: dict[str, str] = _load_aliases()
+        # Reverse alias map: FDCO name → canonical API name (unused directly,
+        # but we keep it for introspection)
+        self._norm_index: dict[str, str] | None = None  # built lazily
+
+    def _build_norm_index(self) -> dict[str, str]:
+        """Build a normalised-name → original-name lookup for fuzzy matching."""
+        return {_normalise(k): k for k in self._ratings}
+
+    def resolve(self, name: str) -> str:
+        """
+        Map a team name to the closest name in self._ratings.
+
+        Resolution order:
+          1. Exact match
+          2. Manual alias (team_aliases.json)
+          3. Normalised-string exact match (strips FC/AFC/UTD)
+          4. difflib fuzzy match (cutoff FUZZY_CUTOFF)
+          5. Original name (caller gets DEFAULT_ELO)
+        """
+        if name in self._ratings:
+            return name
+
+        # Manual alias
+        aliased = self._aliases.get(name)
+        if aliased and aliased in self._ratings:
+            return aliased
+
+        # Normalised exact match
+        norm = _normalise(name)
+        if self._norm_index is None:
+            self._norm_index = self._build_norm_index()
+        if norm in self._norm_index:
+            return self._norm_index[norm]
+
+        # difflib fuzzy
+        candidates = list(self._ratings.keys())
+        matches = difflib.get_close_matches(name, candidates, n=1, cutoff=FUZZY_CUTOFF)
+        if matches:
+            return matches[0]
+        # Also try normalised fuzzy
+        norm_matches = difflib.get_close_matches(norm, list(self._norm_index.keys()), n=1, cutoff=FUZZY_CUTOFF)
+        if norm_matches:
+            return self._norm_index[norm_matches[0]]
+
+        return name  # no match found → caller uses DEFAULT_ELO
 
     def get_rating(self, team: str) -> float:
-        return self._ratings.get(team, DEFAULT_ELO)
+        resolved = self.resolve(team)
+        return self._ratings.get(resolved, DEFAULT_ELO)
 
     def get_diff(self, home_team: str, away_team: str) -> float:
         """Return (home_elo - away_elo), clamped to [-MAX_DIFF, MAX_DIFF]."""
@@ -73,8 +155,14 @@ class EloSystem:
         gd_mult = math.log(gd + 1) + 1.0 if gd > 0 else 1.0
 
         k = K_FACTOR * gd_mult
-        self._ratings[home_team] = self.get_rating(home_team) + k * (s_home - e_home)
-        self._ratings[away_team] = self.get_rating(away_team) + k * (s_away - e_away)
+        # Write back using original names (process_match is always called with
+        # FDCO names, so no resolution needed here)
+        prev_home = self._ratings.get(home_team, DEFAULT_ELO)
+        prev_away = self._ratings.get(away_team, DEFAULT_ELO)
+        self._ratings[home_team] = prev_home + k * (s_home - e_home)
+        self._ratings[away_team] = prev_away + k * (s_away - e_away)
+        # Invalidate norm index after new team added
+        self._norm_index = None
 
     def to_dict(self) -> dict:
         return dict(self._ratings)

@@ -19,6 +19,18 @@ from ml.features import build_feature_vector
 from ml.predict import predict
 from ml.elo import load_elo_ratings, EloSystem
 
+# Must mirror LEAGUE_ID_MAP in fdco_trainer.py
+_LEAGUE_ID_MAP = {
+    "PL":  0,
+    "ELC": 1,
+    "PD":  2,
+    "BL1": 3,
+    "SA":  4,
+    "FL1": 5,
+    "DED": 6,
+    "PPL": 7,
+}
+
 # ELO ratings loaded once at module import (refreshed on retrain)
 _elo: EloSystem = load_elo_ratings()
 
@@ -107,6 +119,7 @@ async def predict_match(
         home_odds=h_odds,
         draw_odds=d_odds,
         away_odds=a_odds,
+        league_id=_LEAGUE_ID_MAP.get(competition_code, -1),
     )
 
     result = predict(
@@ -135,20 +148,21 @@ async def predict_match(
             home=home_team_name,
             away=away_team_name,
             prediction={
-                "result":            result["predicted_outcome"],
-                "confidence":        result["confidence"],
-                "home_prob":         result["home_win_prob"],
-                "draw_prob":         result["draw_prob"],
-                "away_prob":         result["away_win_prob"],
-                "over_2.5_prob":     result["over25_prob"],
-                "btts_prob":         result["btts_prob"],
+                "result":             result["predicted_outcome"],
+                "confidence":         result["confidence"],
+                "home_prob":          result["home_win_prob"],
+                "draw_prob":          result["draw_prob"],
+                "away_prob":          result["away_win_prob"],
+                "over_2.5_prob":      result["over25_prob"],
+                "btts_prob":          result["btts_prob"],
                 "over_2.5_predicted": result["over25_predicted"],
-                "btts_predicted":    result["btts_predicted"],
-                "stars":             result["stars"],
-                "dc_available":      result.get("dc_available", False),
+                "btts_predicted":     result["btts_predicted"],
+                "stars":              result["stars"],
+                "dc_available":       result.get("dc_available", False),
             },
             factors_used=_factors_used(home_xg, h2h_matches),
             key_factors=key_factors,
+            value_bets=result.get("value_bets", []),
         )
         append_prediction(ledger_entry)
 

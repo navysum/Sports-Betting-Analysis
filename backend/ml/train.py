@@ -39,6 +39,7 @@ RESULT_CAL_PATH    = os.path.join(ML_DIR, "result_calibrator.joblib")
 GOALS_CAL_PATH     = os.path.join(ML_DIR, "goals_calibrator.joblib")
 BTTS_CAL_PATH      = os.path.join(ML_DIR, "btts_calibrator.joblib")
 TRAINING_LOG_PATH  = os.path.join(ML_DIR, "training_log.json")
+BEST_PARAMS_PATH   = os.path.join(ML_DIR, "best_params.json")
 
 # Accumulation cache — grows with every retrain
 CACHE_DIR  = os.path.join(os.path.dirname(ML_DIR), "data")
@@ -46,18 +47,49 @@ CACHE_PATH = os.path.join(CACHE_DIR, "training_cache.npz")
 
 COMPETITIONS = ["PL", "PD", "BL1", "SA", "FL1", "ELC", "DED"]
 
+# Must mirror LEAGUE_ID_MAP in fdco_trainer.py
+_LEAGUE_ID_MAP = {
+    "PL":  0,
+    "ELC": 1,
+    "PD":  2,
+    "BL1": 3,
+    "SA":  4,
+    "FL1": 5,
+    "DED": 6,
+    "PPL": 7,
+}
+
 
 # ─── Model factory ────────────────────────────────────────────────────────────
 
-def _make_xgb(n_classes: int = 3) -> XGBClassifier:
+_DEFAULT_PARAMS = {
+    "n_estimators":    500,
+    "max_depth":       4,
+    "learning_rate":   0.03,
+    "subsample":       0.8,
+    "colsample_bytree": 0.75,
+    "min_child_weight": 3,
+    "gamma":           0.15,
+}
+
+
+def _load_best_params() -> dict:
+    """Load tuned hyperparameters from best_params.json if available."""
+    if os.path.exists(BEST_PARAMS_PATH):
+        try:
+            with open(BEST_PARAMS_PATH) as f:
+                params = json.load(f)
+            print(f"  [params] Loaded tuned params from {BEST_PARAMS_PATH}")
+            return params
+        except Exception:
+            pass
+    return _DEFAULT_PARAMS
+
+
+def _make_xgb(n_classes: int = 3, params: dict | None = None) -> XGBClassifier:
+    p = params or _load_best_params()
     return XGBClassifier(
-        n_estimators=500,
-        max_depth=4,
-        learning_rate=0.03,
-        subsample=0.8,
-        colsample_bytree=0.75,
-        min_child_weight=3,
-        gamma=0.15,
+        **p,
         use_label_encoder=False,
         eval_metric="mlogloss" if n_classes > 2 else "logloss",
         num_class=n_classes if n_classes > 2 else None,
@@ -65,6 +97,64 @@ def _make_xgb(n_classes: int = 3) -> XGBClassifier:
         random_state=42,
         n_jobs=-1,
     )
+
+
+def tune_hyperparams(X: np.ndarray, y: np.ndarray) -> dict:
+    """
+    Run RandomizedSearchCV on the result model (3-class) to find better
+    XGBoost hyperparameters. Saves best params to ml/best_params.json.
+
+    Uses the first 80% of data (temporal split) to avoid future leakage.
+    Run with: python -m ml.train --tune
+    """
+    from sklearn.model_selection import RandomizedSearchCV
+
+    split = int(len(X) * 0.8)
+    X_train, y_train = X[:split], y[:split]
+
+    param_dist = {
+        "n_estimators":     [300, 400, 500, 700, 1000],
+        "max_depth":        [3, 4, 5, 6, 7],
+        "learning_rate":    [0.01, 0.02, 0.03, 0.05, 0.08, 0.10],
+        "subsample":        [0.6, 0.7, 0.8, 0.9, 1.0],
+        "colsample_bytree": [0.6, 0.7, 0.75, 0.8, 0.9],
+        "min_child_weight": [1, 2, 3, 5, 8],
+        "gamma":            [0.0, 0.05, 0.1, 0.15, 0.3],
+    }
+
+    base = XGBClassifier(
+        objective="multi:softprob",
+        num_class=3,
+        use_label_encoder=False,
+        eval_metric="mlogloss",
+        random_state=42,
+        n_jobs=-1,
+    )
+
+    print(f"\nTuning hyperparameters on {len(X_train)} samples (30 iterations, 3-fold CV)…")
+    search = RandomizedSearchCV(
+        base,
+        param_dist,
+        n_iter=30,
+        cv=3,
+        scoring="neg_log_loss",
+        random_state=42,
+        n_jobs=1,    # XGB uses n_jobs internally; outer parallelism can cause issues
+        verbose=1,
+        refit=False,
+    )
+    search.fit(X_train, y_train)
+
+    best = search.best_params_
+    score = -search.best_score_
+    print(f"\n[tune] Best params: {best}")
+    print(f"[tune] Best CV log-loss: {score:.4f}")
+
+    with open(BEST_PARAMS_PATH, "w") as f:
+        json.dump(best, f, indent=2)
+    print(f"[tune] Saved → {BEST_PARAMS_PATH}")
+
+    return best
 
 
 # ─── Data cache ───────────────────────────────────────────────────────────────
@@ -194,6 +284,7 @@ async def fetch_api_training_data():
                 home_standing=standing_map.get(home_id),
                 away_standing=standing_map.get(away_id),
                 match_date=date_str,
+                league_id=_LEAGUE_ID_MAP.get(comp, -1),
             )
             X.append(vec)
             y_result.append(result_label)
@@ -357,7 +448,7 @@ def get_last_training_summary() -> dict:
 
 # ─── Entry point ─────────────────────────────────────────────────────────────
 
-async def main():
+async def main(tune: bool = False):
     print("=== Sports Bet Analysis — Model Training ===\n")
 
     # 1. Load accumulated cache
@@ -390,10 +481,16 @@ async def main():
         print("ERROR: Not enough training data. Check your API key and CSV files.")
         return
 
+    # Optional hyperparameter tuning pass (run before training)
+    if tune:
+        tune_hyperparams(X, y_result)
+
     # Pass odds_rows from FDCO for Dixon-Coles fitting
     # (odds_rows from CSV data have home_goals/away_goals; API data doesn't)
     train_all(X, y_result, y_goals, y_btts, odds_rows=odds_rows_fdco)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    _tune = "--tune" in sys.argv
+    asyncio.run(main(tune=_tune))

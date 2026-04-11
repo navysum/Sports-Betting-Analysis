@@ -23,11 +23,12 @@ from app.config import settings
 from ml.features import build_feature_vector, N_FEATURES
 from ml.elo import EloSystem, save_elo_ratings
 
-# Seasons to load (most recent first; earlier seasons used first for training)
-SEASONS = ["2021", "2122", "2223", "2324", "2425"]
+# Seasons to load (oldest first — chronological order matters for ELO + rolling stats)
+SEASONS = ["1718", "1819", "1920", "2021", "2122", "2223", "2324", "2425"]
 
 # football-data.co.uk season codes  (URL path segment)
 FDCO_SEASON_CODES = {
+    "1718": "1718", "1819": "1819", "1920": "1920",
     "2021": "2021", "2122": "2122", "2223": "2223",
     "2324": "2324", "2425": "2425",
 }
@@ -42,6 +43,18 @@ FDCO_LEAGUES = {
     "FL1": "F1",
     "DED": "N1",
     "PPL": "P1",
+}
+
+# Ordinal league IDs — must match LEAGUE_ID_MAP in train.py and prediction_service.py
+LEAGUE_ID_MAP = {
+    "PL":  0,
+    "ELC": 1,
+    "PD":  2,
+    "BL1": 3,
+    "SA":  4,
+    "FL1": 5,
+    "DED": 6,
+    "PPL": 7,
 }
 
 
@@ -93,6 +106,13 @@ def _rows_to_match_dicts(df: pd.DataFrame) -> list[dict]:
                 "_b365h": _safe_float(row, "B365H"),
                 "_b365d": _safe_float(row, "B365D"),
                 "_b365a": _safe_float(row, "B365A"),
+                "_b365_o25": _safe_float(row, "B365>2.5"),
+                "_b365_u25": _safe_float(row, "B365<2.5"),
+                # Shot statistics (used for rolling shot features in feature vector)
+                "_hs":  _safe_float(row, "HS"),
+                "_as":  _safe_float(row, "AS"),
+                "_hst": _safe_float(row, "HST"),
+                "_ast": _safe_float(row, "AST"),
                 "_home": home,
                 "_away": away,
                 "_date": date_iso,
@@ -184,6 +204,7 @@ def build_fdco_training_data(
         # Fresh ELO for each league — cross-league mixing not meaningful for domestic
         elo = EloSystem()
         league_elo[league_code] = elo
+        league_id = LEAGUE_ID_MAP.get(league_code, -1)
 
         for season in SEASONS:
             path = os.path.join(csv_dir, f"{league_code}_{season}.csv")
@@ -259,6 +280,7 @@ def build_fdco_training_data(
                     home_odds=h_odds,
                     draw_odds=d_odds,
                     away_odds=a_odds,
+                    league_id=league_id,
                 )
 
                 X_all.append(vec)
@@ -280,6 +302,8 @@ def build_fdco_training_data(
                     "b365h": m.get("_b365h"),
                     "b365d": m.get("_b365d"),
                     "b365a": m.get("_b365a"),
+                    "b365_o25": m.get("_b365_o25"),
+                    "b365_u25": m.get("_b365_u25"),
                     "feature_idx": len(X_all) - 1,  # index into X
                 })
 
@@ -321,7 +345,7 @@ async def download_all_csvs(seasons: list[str] = None) -> None:
     """Download FDCO CSVs for all leagues and seasons."""
     from app.services.scraper import download_fdco_csv
     if seasons is None:
-        seasons = ["2425", "2324", "2223", "2122", "2021"]
+        seasons = ["2425", "2324", "2223", "2122", "2021", "1920", "1819", "1718"]
     print(f"  [fdco] Downloading CSVs for {len(FDCO_LEAGUES)} leagues × {len(seasons)} seasons…")
     for season in seasons:
         for league_code in FDCO_LEAGUES:

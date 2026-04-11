@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(npm create:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tailwindcss:*)",
+      "Bash(python -m venv venv)",
+      "Bash(venv/Scripts/pip install:*)",
+      "Bash(cp -r '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend' '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/Sports-Betting-Analysis/')",
+      "Bash(cp -r '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/frontend' '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/Sports-Betting-Analysis/')",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/docker-compose.yml' '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/Sports-Betting-Analysis/')",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/.gitignore' '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/Sports-Betting-Analysis/')",
+      "Bash(python -c ':*)",
+      "Read(//c/Users/ataid/backend/**)",
+      "Read(//c/Users/ataid/**)",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend/ml/elo.py' /c/Users/ataid/backend/ml/elo.py)",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend/ml/features.py' /c/Users/ataid/backend/ml/features.py)",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend/ml/fdco_trainer.py' /c/Users/ataid/backend/ml/fdco_trainer.py)",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend/ml/train.py' /c/Users/ataid/backend/ml/train.py)",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend/ml/backtest.py' /c/Users/ataid/backend/ml/backtest.py)",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend/app/services/evaluator.py' /c/Users/ataid/backend/app/services/evaluator.py)",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend/app/services/football_api.py' /c/Users/ataid/backend/app/services/football_api.py)",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend/app/services/odds_api.py' /c/Users/ataid/backend/app/services/odds_api.py)",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend/app/services/prediction_service.py' /c/Users/ataid/backend/app/services/prediction_service.py)",
+      "Bash(cp '/c/Users/ataid/OneDrive/Desktop/Claude Projects/Sports Bet Analysis/backend/bot/formatter.py' /c/Users/ataid/backend/bot/formatter.py)"
+    ]
+  }
+}

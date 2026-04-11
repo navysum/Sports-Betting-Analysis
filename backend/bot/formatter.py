@@ -446,10 +446,6 @@ def format_backtest(result: dict) -> str:
     total   = result.get("total_matches", 0)
     holdout = result.get("holdout_pct", 30)
 
-    def _n(v, decimals=1):
-        """Format a number and escape it for MarkdownV2."""
-        return _esc(f"{v:.{decimals}f}")
-
     def _pnl(pnl: float) -> str:
         sign = "+" if pnl >= 0 else ""
         return _esc(f"{sign}£{pnl:.2f}")
@@ -461,6 +457,9 @@ def format_backtest(result: dict) -> str:
     def _wr(wr: float) -> str:
         return _esc(f"{wr:.1f}%")
 
+    def _dd(v: float) -> str:
+        return _esc(f"{v:.1f}%")
+
     lines = [
         "*📊 Backtest \\(most recent {}% of data\\)*".format(holdout),
         f"_{_esc(str(total))} matches in holdout_",
@@ -468,15 +467,66 @@ def format_backtest(result: dict) -> str:
         "*Flat — £1 on predicted outcome every match*",
         f"  Bets: {flat.get('bets', 0)}  \\|  Win rate: {_wr(flat.get('win_rate', 0))}",
         f"  P&L: {_pnl(flat.get('pnl', 0))}  \\|  ROI: {_roi(flat.get('roi', 0))}",
+        f"  Max drawdown: {_dd(flat.get('max_drawdown', 0))}",
         "",
         f"*Value — bet only when model edge ≥ {_esc(str(value.get('min_edge_pct', 3)))}%*",
         f"  Bets: {value.get('bets', 0)}  \\|  Win rate: {_wr(value.get('win_rate', 0))}",
         f"  P&L: {_pnl(value.get('pnl', 0))}  \\|  ROI: {_roi(value.get('roi', 0))}",
+        f"  Max drawdown: {_dd(value.get('max_drawdown', 0))}",
         "",
         f"*Kelly — {int(kelly.get('fraction', 0.25)*100)}% Kelly staking on value bets*",
         f"  Bets: {kelly.get('bets', 0)}  \\|  Win rate: {_wr(kelly.get('win_rate', 0))}",
         f"  Bankroll: {_esc('£' + str(int(kelly.get('starting_bankroll', 100))))} → {_pnl(kelly.get('final_bankroll', 0))}",
-        f"  Max drawdown: {_esc(str(kelly.get('max_drawdown_pct', 0)) + '%')}",
+        f"  Max drawdown: {_dd(kelly.get('max_drawdown_pct', 0))}",
+    ]
+
+    # ── By confidence tier ────────────────────────────────────────────────────
+    by_conf = result.get("by_confidence", {})
+    if by_conf:
+        lines += ["", "*By Confidence \\(flat staking\\)*"]
+        for tier, stats in by_conf.items():
+            f = stats.get("flat", {})
+            if f.get("bets", 0) == 0:
+                continue
+            lines.append(
+                f"  {_esc(tier)}: {f['bets']} bets \\| "
+                f"{_wr(f.get('win_rate', 0))} WR \\| "
+                f"ROI {_roi(f.get('roi', 0))}"
+            )
+
+    # ── By league ─────────────────────────────────────────────────────────────
+    by_league = result.get("by_league", {})
+    if by_league:
+        lines += ["", "*By League \\(value staking ROI\\)*"]
+        league_names = {
+            "PL": "Premier League", "ELC": "Championship",
+            "PD": "La Liga", "BL1": "Bundesliga",
+            "SA": "Serie A", "FL1": "Ligue 1",
+            "DED": "Eredivisie", "PPL": "Primeira Liga",
+        }
+        for code, stats in by_league.items():
+            v = stats.get("value", {})
+            if v.get("bets", 0) == 0:
+                continue
+            name = league_names.get(code, code)
+            lines.append(
+                f"  {_esc(name)}: {v['bets']} bets \\| "
+                f"ROI {_roi(v.get('roi', 0))}"
+            )
+
+    # ── Side markets ──────────────────────────────────────────────────────────
+    side = result.get("side_markets", {})
+    ou = side.get("over_under_25", {})
+    if ou.get("available") and ou.get("bets", 0) > 0:
+        lines += [
+            "",
+            "*Side Markets \\(flat staking\\)*",
+            f"  Over\\/Under 2\\.5: {ou['bets']} bets \\| "
+            f"{_wr(ou.get('win_rate', 0))} WR \\| "
+            f"P&L {_pnl(ou.get('pnl', 0))} \\| ROI {_roi(ou.get('roi', 0))}",
+        ]
+
+    lines += [
         "",
         "_Note: model was trained on older seasons — holdout is partially in\\-sample\\._",
         "_For fully out\\-of\\-sample results, track live predictions with /accuracy\\._",

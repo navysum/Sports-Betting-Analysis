@@ -172,7 +172,7 @@ async def task_weekly_retrain(context) -> None:
 
 
 async def task_weekly_report(context) -> None:
-    """Sunday 09:00 — Send the weekly performance report."""
+    """Sunday 09:00 — Send the weekly performance report + model health check."""
     log.info("[scheduler] Sending weekly report…")
     try:
         import json, os
@@ -186,6 +186,31 @@ async def task_weekly_report(context) -> None:
         summary = get_last_training_summary()
         text = format_weekly_report(acc7, bets, summary)
         await _send(context.bot, text)
+
+        # ── Model health check ────────────────────────────────────────────────
+        # Alert if 7-day accuracy drops below 35% on ≥10 settled predictions
+        # (35% = barely above random for 1X2; anything below suggests model failure)
+        _ACCURACY_FLOOR = 0.35
+        _MIN_SAMPLE     = 10
+        if (
+            acc7.get("total", 0) >= _MIN_SAMPLE
+            and acc7.get("result_accuracy", 1.0) < _ACCURACY_FLOOR
+        ):
+            acc_pct = acc7["result_accuracy"] * 100
+            total   = acc7["total"]
+            log.warning(
+                f"[scheduler] Model health alert: {acc_pct:.1f}% accuracy "
+                f"on {total} predictions — triggering emergency retrain."
+            )
+            alert = (
+                f"⚠️ *Model Health Alert*\n"
+                f"7\\-day accuracy: {acc_pct:.1f}% on {total} predictions\n"
+                f"Below {int(_ACCURACY_FLOOR * 100)}% floor — "
+                f"initiating emergency retrain…"
+            )
+            await _send(context.bot, alert)
+            await task_weekly_retrain(context)
+
     except Exception as e:
         log.error(f"[scheduler] Weekly report failed: {e}")
 
