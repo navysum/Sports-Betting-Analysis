@@ -206,6 +206,7 @@ async def cmd_analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             away_team_id=away_id,
             home_team_name=home_display,
             away_team_name=away_display,
+            save_to_ledger=True,
         )
 
         home_form = _form_results(home_matches, home_id)
