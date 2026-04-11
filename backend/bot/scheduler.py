@@ -27,7 +27,7 @@ from app.services.evaluator import (
 )
 import os
 from app.services.scraper import bulk_download_historical
-from app.services.football_api import get_all_today_matches, FDORG_COMPETITIONS
+from app.services.football_api import get_all_today_matches, FDORG_COMPETITIONS, build_team_cache
 from bot.formatter import (
     format_daily_briefing,
     format_weekly_report,
@@ -264,9 +264,22 @@ async def task_weekly_report(context) -> None:
 # Registration
 # ──────────────────────────────────────────────────────────────────────────────
 
+async def task_build_team_cache(context) -> None:
+    """Run once 15s after startup — builds the team name lookup cache."""
+    log.info("[scheduler] Building team lookup cache…")
+    try:
+        await build_team_cache()
+        log.info("[scheduler] Team cache ready.")
+    except Exception as e:
+        log.error(f"[scheduler] Team cache build failed: {e}")
+
+
 def register_jobs(app: Application) -> None:
     """Register all scheduled jobs with PTB's JobQueue."""
     jq = app.job_queue
+
+    # Build team cache 15s after startup (non-blocking)
+    jq.run_once(task_build_team_cache, when=15, name="build_team_cache")
 
     # Daily scrape at 02:00 BST
     jq.run_daily(

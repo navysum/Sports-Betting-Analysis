@@ -173,11 +173,85 @@ async def get_all_tomorrow_matches() -> list[dict]:
     return results
 
 
+# ── Team lookup cache ─────────────────────────────────────────────────────────
+# The free-tier /v4/teams?name=... endpoint ignores the name filter and returns
+# all teams (sorted so "1. FC Köln" always comes first). Instead we fetch each
+# competition's team list once at startup and search locally.
+
+_team_cache: dict[str, dict] = {}   # lowercase name/shortName → team dict
+_team_cache_lock = asyncio.Lock()
+_team_cache_ready = False
+
+
+async def build_team_cache() -> None:
+    """
+    Fetch every competition's team list and build a local lookup cache.
+    Uses its own httpx session with a 2s delay — bypasses the prediction
+    rate limiter so cache build never queues behind live prediction requests.
+    Called once at startup via the scheduler.
+    """
+    global _team_cache, _team_cache_ready
+    async with _team_cache_lock:
+        if _team_cache_ready:
+            return
+        added = 0
+        async with httpx.AsyncClient(timeout=20) as client:
+            for code in FDORG_COMPETITIONS:
+                try:
+                    resp = await client.get(
+                        f"{BASE_URL}/competitions/{code}/teams",
+                        headers=_headers(),
+                    )
+                    resp.raise_for_status()
+                    for team in resp.json().get("teams", []):
+                        for field in ("name", "shortName"):
+                            val = (team.get(field) or "").strip()
+                            if val:
+                                _team_cache[val.lower()] = team
+                                added += 1
+                except Exception:
+                    pass
+                await asyncio.sleep(2)   # gentle pacing, separate from rate limiter
+        _team_cache_ready = True
+        print(f"[football_api] Team cache built: {len(_team_cache)} entries from {added} names")
+
+
 async def find_team_by_name(name: str) -> Optional[dict]:
-    """Search for a team by name (uses the teams endpoint)."""
+    """
+    Find a team by name using the local cache (built at startup).
+    Falls back to the API search endpoint if the cache isn't ready yet.
+    """
+    from difflib import get_close_matches
+
+    name_lower = name.lower()
+    words = [w for w in name_lower.split() if len(w) >= 4]
+
+    if _team_cache:
+        # 1. Exact match
+        if name_lower in _team_cache:
+            return _team_cache[name_lower]
+
+        # 2. All significant words present in the key
+        for key, team in _team_cache.items():
+            if words and all(w in key for w in words):
+                return team
+
+        # 3. Fuzzy match (difflib)
+        candidates = list(_team_cache.keys())
+        close = get_close_matches(name_lower, candidates, n=1, cutoff=0.65)
+        if close:
+            return _team_cache[close[0]]
+
+        return None
+
+    # Cache not yet ready — fall back to API, but validate the result
     try:
-        data = await _get(f"{BASE_URL}/teams", {"name": name, "limit": 5})
-        teams = data.get("teams", [])
-        return teams[0] if teams else None
+        data = await _get(f"{BASE_URL}/teams", {"name": name, "limit": 10})
+        for team in data.get("teams", []):
+            tname  = (team.get("name")      or "").lower()
+            tshort = (team.get("shortName") or "").lower()
+            if any(w in tname or w in tshort for w in words):
+                return team
+        return None
     except Exception:
         return None
