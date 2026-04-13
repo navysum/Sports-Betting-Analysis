@@ -3,92 +3,94 @@ import { getStandings } from "../services/api";
 import CompetitionSelector from "../components/CompetitionSelector";
 
 export default function StandingsPage() {
-  const [competition, setCompetition] = useState("PL");
+  const [comp, setComp] = useState("PL");
   const [table, setTable] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     setLoading(true);
     setError(null);
-    getStandings(competition)
-      .then((res) => setTable(res.data.table || []))
-      .catch((e) => setError(e.message))
+    getStandings(comp)
+      .then(r => setTable(r.data.table || []))
+      .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }, [competition]);
+  }, [comp]);
+
+  function zone(i, total) {
+    if (comp === "CL") return null;
+    if (i < 4) return "bg-green-500";
+    if (i === 4) return "bg-blue-500";
+    if (i >= total - 3) return "bg-red-500";
+    return null;
+  }
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-8">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-        <h1 className="text-2xl font-bold text-white">Standings</h1>
-        <CompetitionSelector value={competition} onChange={setCompetition} />
+    <div className="max-w-3xl mx-auto content-pad">
+      <div className="px-4 pt-5 pb-4 flex items-center justify-between">
+        <h1 className="text-base font-semibold text-white">Standings</h1>
+        <CompetitionSelector value={comp} onChange={setComp} />
       </div>
 
-      {loading && <p className="text-slate-400 text-center py-12">Loading…</p>}
-      {error && (
-        <div className="bg-red-900/40 border border-red-700 rounded-xl p-4 text-red-300 text-sm">
-          {error}
-        </div>
-      )}
+      {loading && <div className="px-4 py-12 text-center text-xs text-zinc-600">Loading…</div>}
+      {error && <div className="px-4 text-xs text-red-500">{error}</div>}
 
-      {!loading && !error && (
-        <div className="bg-slate-800 border border-slate-700 rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-slate-400 border-b border-slate-700 text-xs uppercase">
-                <th className="px-3 py-3 text-left w-8">#</th>
-                <th className="px-3 py-3 text-left">Team</th>
-                <th className="px-3 py-3 text-center">P</th>
-                <th className="px-3 py-3 text-center">W</th>
-                <th className="px-3 py-3 text-center">D</th>
-                <th className="px-3 py-3 text-center">L</th>
-                <th className="px-3 py-3 text-center">GD</th>
-                <th className="px-3 py-3 text-center font-bold text-white">Pts</th>
-              </tr>
-            </thead>
-            <tbody>
-              {table.map((row, i) => (
-                <tr
-                  key={row.team?.id}
-                  className={`border-b border-slate-700/50 hover:bg-slate-700/40 transition-colors ${
-                    i < 4 ? "border-l-2 border-l-green-500" :
-                    i === 4 ? "border-l-2 border-l-blue-500" :
-                    i >= table.length - 3 ? "border-l-2 border-l-red-500" : ""
-                  }`}
-                >
-                  <td className="px-3 py-2.5 text-slate-400">{row.position}</td>
-                  <td className="px-3 py-2.5">
-                    <div className="flex items-center gap-2">
-                      {row.team?.crest && (
-                        <img src={row.team.crest} alt="" className="w-5 h-5 object-contain" />
-                      )}
-                      <span className="font-medium">{row.team?.shortName || row.team?.name}</span>
-                    </div>
-                  </td>
-                  <td className="px-3 py-2.5 text-center text-slate-400">{row.playedGames}</td>
-                  <td className="px-3 py-2.5 text-center text-green-400">{row.won}</td>
-                  <td className="px-3 py-2.5 text-center text-yellow-400">{row.draw}</td>
-                  <td className="px-3 py-2.5 text-center text-red-400">{row.lost}</td>
-                  <td className="px-3 py-2.5 text-center text-slate-300">
-                    {row.goalDifference > 0 ? `+${row.goalDifference}` : row.goalDifference}
-                  </td>
-                  <td className="px-3 py-2.5 text-center font-bold text-white">{row.points}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="px-4 py-2 flex gap-4 text-xs text-slate-500 border-t border-slate-700">
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 bg-green-500 rounded-sm" /> Champions League
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 bg-blue-500 rounded-sm" /> Europa League
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="w-2 h-2 bg-red-500 rounded-sm" /> Relegation
-            </span>
+      {!loading && !error && table.length > 0 && (
+        <>
+          {/* Column headers */}
+          <div className="px-4 pb-1 grid text-[11px] text-zinc-600 font-medium"
+               style={{ gridTemplateColumns: "1.5rem 1fr 1.8rem 1.8rem 1.8rem 1.8rem 2.5rem 2.5rem" }}>
+            <span>#</span>
+            <span>Club</span>
+            <span className="text-center">P</span>
+            <span className="text-center text-green-600">W</span>
+            <span className="text-center text-yellow-600">D</span>
+            <span className="text-center text-red-600">L</span>
+            <span className="text-center">GD</span>
+            <span className="text-center text-white">Pts</span>
           </div>
-        </div>
+
+          <div className="border-t border-zinc-800">
+            {table.map((row, i) => {
+              const z = zone(i, table.length);
+              return (
+                <div key={row.team?.id}
+                  className="grid items-center px-4 py-2 border-b border-zinc-800/40
+                             hover:bg-zinc-900/50 transition-colors"
+                  style={{ gridTemplateColumns: "1.5rem 1fr 1.8rem 1.8rem 1.8rem 1.8rem 2.5rem 2.5rem" }}>
+                  {/* Pos with zone colour */}
+                  <div className="flex items-center gap-1.5">
+                    {z && <div className={`w-0.5 h-4 rounded-full ${z}`} />}
+                    <span className="text-xs text-zinc-500 tabular-nums">{row.position}</span>
+                  </div>
+                  {/* Team */}
+                  <div className="flex items-center gap-2 min-w-0">
+                    {row.team?.crest && (
+                      <img src={row.team.crest} alt="" className="w-4 h-4 object-contain shrink-0 opacity-80" />
+                    )}
+                    <span className="text-sm truncate">{row.team?.shortName || row.team?.name}</span>
+                  </div>
+                  <span className="text-xs text-zinc-500 text-center tabular-nums">{row.playedGames}</span>
+                  <span className="text-xs text-green-600 text-center tabular-nums">{row.won}</span>
+                  <span className="text-xs text-yellow-600 text-center tabular-nums">{row.draw}</span>
+                  <span className="text-xs text-red-600 text-center tabular-nums">{row.lost}</span>
+                  <span className="text-xs text-zinc-400 text-center tabular-nums">
+                    {row.goalDifference > 0 ? `+${row.goalDifference}` : row.goalDifference}
+                  </span>
+                  <span className="text-sm font-semibold text-white text-center tabular-nums">{row.points}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          {comp !== "CL" && (
+            <div className="px-4 pt-3 flex gap-4 text-[11px] text-zinc-600">
+              <span className="flex items-center gap-1.5"><span className="w-1 h-3 rounded-full bg-green-500 inline-block"/>UCL</span>
+              <span className="flex items-center gap-1.5"><span className="w-1 h-3 rounded-full bg-blue-500 inline-block"/>UEL</span>
+              <span className="flex items-center gap-1.5"><span className="w-1 h-3 rounded-full bg-red-500 inline-block"/>Relegation</span>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

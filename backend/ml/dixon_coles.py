@@ -330,7 +330,7 @@ def save_dc_model(dc: DixonColesModel) -> None:
     with open(DC_PARAMS_PATH, "w") as f:
         json.dump(dc.to_dict(), f, indent=2)
     n = len(dc.attack)
-    print(f"  [dc] Dixon-Coles saved → {DC_PARAMS_PATH} ({n} teams)")
+    print(f"  [dc] Dixon-Coles saved -> {DC_PARAMS_PATH} ({n} teams)")
 
 
 def load_dc_model() -> Optional[DixonColesModel]:

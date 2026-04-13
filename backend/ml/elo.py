@@ -90,7 +90,7 @@ def save_elo_ratings(elo: EloSystem) -> None:
     os.makedirs(_DATA_DIR, exist_ok=True)
     with open(ELO_PATH, "w") as f:
         json.dump(elo.to_dict(), f, indent=2)
-    print(f"  [elo] Saved {len(elo._ratings)} team ratings → {ELO_PATH}")
+    print(f"  [elo] Saved {len(elo._ratings)} team ratings -> {ELO_PATH}")
 
 
 def load_elo_ratings() -> EloSystem:

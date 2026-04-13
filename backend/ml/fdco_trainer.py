@@ -308,7 +308,7 @@ def build_fdco_training_data(
                 merged_elo._ratings[team] = rating
     save_elo_ratings(merged_elo)
 
-    print(f"  [fdco] {total_files} CSV files → {len(X_all)} training samples")
+    print(f"  [fdco] {total_files} CSV files -> {len(X_all)} training samples")
     return (
         np.array(X_all, dtype=np.float32),
         np.array(y_result_all),

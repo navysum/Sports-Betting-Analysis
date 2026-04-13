@@ -1,90 +1,151 @@
-function ProbBar({ label, prob, color }) {
-  const pct = prob != null ? Math.round(prob * 100) : 0;
+const OC = {
+  HOME: { label: "Home", color: "text-green-400" },
+  DRAW: { label: "Draw", color: "text-yellow-400" },
+  AWAY: { label: "Away", color: "text-blue-400" },
+};
+
+function Bar({ prob, color }) {
+  const w = prob != null ? Math.round(prob * 100) : 0;
   return (
-    <div className="flex items-center gap-2 text-sm">
-      <span className="w-12 text-slate-400 text-xs">{label}</span>
-      <div className="flex-1 bg-slate-700 rounded-full h-2">
-        <div
-          className={`h-2 rounded-full ${color}`}
-          style={{ width: `${pct}%` }}
-        />
+    <div className="flex items-center gap-2 text-xs">
+      <div className="flex-1 h-1 bg-zinc-800 rounded-full overflow-hidden">
+        <div className={`h-full ${color} rounded-full`} style={{ width: `${w}%` }} />
       </div>
-      <span className="w-8 text-right font-mono text-slate-200">{pct}%</span>
+      <span className="text-zinc-500 tabular-nums w-8 text-right">{w}%</span>
     </div>
   );
 }
 
-function OutcomeBadge({ outcome }) {
-  const map = {
-    HOME: { label: "Home Win", cls: "bg-green-700 text-green-100" },
-    DRAW: { label: "Draw", cls: "bg-yellow-700 text-yellow-100" },
-    AWAY: { label: "Away Win", cls: "bg-blue-700 text-blue-100" },
-  };
-  const { label, cls } = map[outcome] || { label: outcome, cls: "bg-slate-600 text-slate-200" };
+function Stars({ n = 1 }) {
   return (
-    <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${cls}`}>
-      {label}
+    <span className="text-xs">
+      {[1,2,3,4,5].map(i => (
+        <span key={i} className={i <= n ? "text-yellow-400" : "text-zinc-700"}>★</span>
+      ))}
     </span>
   );
 }
 
 export default function PredictionCard({ data }) {
-  const { home_team, away_team, home_team_crest, away_team_crest, match_date, prediction } = data;
+  const { home_team, away_team, match_date, competition, prediction: pred = {} } = data;
 
-  const date = match_date
-    ? new Date(match_date).toLocaleDateString("en-GB", {
-        weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+  const kickoff = match_date
+    ? new Date(match_date).toLocaleString("en-GB", {
+        weekday: "short", day: "numeric", month: "short",
+        hour: "2-digit", minute: "2-digit",
       })
     : "—";
 
-  const confidence = prediction?.confidence != null
-    ? Math.round(prediction.confidence * 100)
-    : null;
+  const oc = OC[pred.predicted_outcome];
+  const conf = pred.confidence != null ? Math.round(pred.confidence * 100) : null;
+  const vbets = pred.value_bets || [];
+  const scores = pred.correct_scores || [];
+  const isFlat = pred.predicted_outcome && (
+    Math.max(pred.home_win_prob, pred.draw_prob, pred.away_win_prob) -
+    Math.min(pred.home_win_prob, pred.draw_prob, pred.away_win_prob) < 0.08
+  );
 
   return (
-    <div className="bg-slate-800 border border-slate-700 rounded-xl p-4 hover:border-green-600 transition-colors">
-      {/* Teams */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2 flex-1">
-          {home_team_crest && (
-            <img src={home_team_crest} alt="" className="w-7 h-7 object-contain" />
-          )}
-          <span className="font-semibold text-sm truncate">{home_team}</span>
-        </div>
-
-        <div className="px-3 text-slate-500 font-bold text-xs">VS</div>
-
-        <div className="flex items-center gap-2 flex-1 justify-end">
-          <span className="font-semibold text-sm truncate text-right">{away_team}</span>
-          {away_team_crest && (
-            <img src={away_team_crest} alt="" className="w-7 h-7 object-contain" />
-          )}
-        </div>
+    <div className={`border rounded-md p-3 space-y-2.5 ${
+      vbets.length ? "border-green-900/60 bg-zinc-900/60" : "border-zinc-800 bg-zinc-900/40"
+    }`}>
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] text-zinc-600">{competition}</span>
+        <span className="text-[11px] text-zinc-600 tabular-nums">{kickoff}</span>
       </div>
 
-      {/* Date */}
-      <p className="text-xs text-slate-500 mb-3">{date}</p>
+      {/* Teams */}
+      <div className="flex items-center gap-2">
+        {data.home_team_crest && (
+          <img src={data.home_team_crest} alt="" className="w-4 h-4 object-contain opacity-80" />
+        )}
+        <span className="text-sm font-medium flex-1 truncate">{home_team}</span>
+        <span className="text-xs text-zinc-700">vs</span>
+        <span className="text-sm font-medium flex-1 truncate text-right">{away_team}</span>
+        {data.away_team_crest && (
+          <img src={data.away_team_crest} alt="" className="w-4 h-4 object-contain opacity-80" />
+        )}
+      </div>
 
-      {/* Prediction */}
-      {prediction?.predicted_outcome ? (
+      {/* No prediction */}
+      {!pred.predicted_outcome && (
+        <p className="text-xs text-zinc-600 italic">No prediction</p>
+      )}
+
+      {pred.predicted_outcome && isFlat && (
+        <p className="text-xs text-zinc-600">Insufficient data</p>
+      )}
+
+      {pred.predicted_outcome && !isFlat && (
         <>
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-xs text-slate-400">Predicted:</span>
-            <OutcomeBadge outcome={prediction.predicted_outcome} />
-            {confidence && (
-              <span className="text-xs text-slate-400 ml-auto">
-                {confidence}% confident
+          {/* Outcome row */}
+          <div className="flex items-center gap-2">
+            <span className={`text-sm font-medium ${oc?.color || "text-zinc-300"}`}>
+              {oc?.label}
+            </span>
+            <Stars n={pred.stars} />
+            {conf && <span className="ml-auto text-xs text-zinc-600 tabular-nums">{conf}%</span>}
+          </div>
+
+          {/* Bars */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1 text-[11px] text-zinc-600">
+              <span className="w-8">H</span><Bar prob={pred.home_win_prob} color="bg-green-500" />
+            </div>
+            <div className="flex items-center gap-1 text-[11px] text-zinc-600">
+              <span className="w-8">D</span><Bar prob={pred.draw_prob} color="bg-yellow-500" />
+            </div>
+            <div className="flex items-center gap-1 text-[11px] text-zinc-600">
+              <span className="w-8">A</span><Bar prob={pred.away_win_prob} color="bg-blue-500" />
+            </div>
+          </div>
+
+          {/* Metrics */}
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-zinc-600">
+            {pred.over25_prob != null && (
+              <span className={pred.over25_prob >= 0.5 ? "text-zinc-300" : ""}>
+                O2.5 {Math.round(pred.over25_prob * 100)}%
               </span>
             )}
+            {pred.btts_prob != null && (
+              <span className={pred.btts_prob >= 0.5 ? "text-zinc-300" : ""}>
+                BTTS {Math.round(pred.btts_prob * 100)}%
+              </span>
+            )}
+            {pred.xg_home != null && (
+              <span>xG {pred.xg_home.toFixed(2)}–{pred.xg_away?.toFixed(2)}</span>
+            )}
           </div>
-          <div className="space-y-1.5">
-            <ProbBar label="Home" prob={prediction.home_win_prob} color="bg-green-500" />
-            <ProbBar label="Draw" prob={prediction.draw_prob} color="bg-yellow-500" />
-            <ProbBar label="Away" prob={prediction.away_win_prob} color="bg-blue-500" />
-          </div>
+
+          {/* Correct scores */}
+          {scores.length > 0 && (
+            <div className="flex gap-3 text-xs text-zinc-600 flex-wrap">
+              {scores.slice(0, 4).map(s => (
+                <span key={s.score}>
+                  <span className="text-zinc-300 font-mono">{s.score}</span>{" "}
+                  {Math.round(s.prob * 100)}%
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Value bets */}
+          {vbets.length > 0 && (
+            <div className="flex flex-wrap gap-2 text-xs">
+              {vbets.map((vb, i) => {
+                const label = vb.split("(")[0].trim();
+                const nums = vb.match(/(\d+)%/g);
+                const edge = nums?.length >= 2 ? parseInt(nums[0]) - parseInt(nums[1]) : null;
+                return (
+                  <span key={i} className="text-green-500">
+                    ↑ {label}{edge != null ? ` +${edge}%` : ""}
+                  </span>
+                );
+              })}
+            </div>
+          )}
         </>
-      ) : (
-        <p className="text-xs text-slate-500 italic">Prediction unavailable</p>
       )}
     </div>
   );
