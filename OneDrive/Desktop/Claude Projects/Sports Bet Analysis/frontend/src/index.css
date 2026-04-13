@@ -2,8 +2,81 @@
 @tailwind components;
 @tailwind utilities;
 
+* {
+  -webkit-tap-highlight-color: transparent;
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 15px;
+}
+
+/* ── Theme variables ──────────────────────────────────────────────────────── */
+:root {
+  --nav-bg: #0a0a0a;
+  --nav-bg-blur: rgba(10,10,10,0.95);
+}
+html.light {
+  --nav-bg: #ffffff;
+  --nav-bg-blur: rgba(255,255,255,0.95);
+}
+
+/* Nav uses CSS variables so they flip with theme */
+.nav-bg      { background-color: var(--nav-bg); }
+.nav-bg-blur { background-color: var(--nav-bg-blur); }
+
 body {
-  background-color: #0f172a;
-  color: #f1f5f9;
-  font-family: 'Inter', sans-serif;
+  background: #0a0a0a;
+  color: #e4e4e7;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100dvh;
+  transition: background 0.2s, color 0.2s;
+}
+
+/* ── Light mode overrides ─────────────────────────────────────────────────── */
+html.light body {
+  background: #f1f5f9;
+  color: #0f172a;
+}
+
+/* Borders */
+html.light .border-zinc-800,
+html.light .border-zinc-800\/60,
+html.light .border-zinc-800\/40 { border-color: #e2e8f0; }
+html.light .border-zinc-700 { border-color: #cbd5e1; }
+
+/* Surfaces / card backgrounds */
+html.light .bg-zinc-900\/30 { background-color: rgba(255,255,255,0.7); }
+html.light .bg-zinc-900\/40 { background-color: rgba(255,255,255,0.9); }
+html.light .bg-zinc-900    { background-color: #ffffff; }
+html.light .bg-zinc-800    { background-color: #e2e8f0; }
+
+/* Hover states */
+html.light .hover\:bg-zinc-900\/40:hover { background-color: rgba(241,245,249,0.9); }
+
+/* Text */
+html.light .text-white  { color: #0f172a; }
+html.light .text-zinc-200 { color: #1e293b; }
+html.light .text-zinc-300 { color: #334155; }
+html.light .text-zinc-400 { color: #475569; }
+html.light .hover\:text-zinc-200:hover { color: #1e293b; }
+html.light .hover\:text-zinc-300:hover { color: #334155; }
+html.light .hover\:text-white:hover    { color: #0f172a; }
+
+/* Input fields */
+html.light .placeholder-zinc-600::placeholder { color: #94a3b8; }
+html.light .focus\:border-zinc-500:focus { border-color: #94a3b8; }
+
+/* SVG stroke colours that reference text- classes — handled via currentColor */
+
+/* Hide scrollbar but keep functionality */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Bottom nav safe area */
+.content-pad { padding-bottom: calc(56px + env(safe-area-inset-bottom, 8px)); }
+
+@media (min-width: 768px) {
+  .content-pad { padding-bottom: 2rem; }
 }
