@@ -1,11 +1,95 @@
+import asyncio
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 from app.services.prediction_service import predict_match, predict_upcoming_batch
-from app.services.football_api import get_upcoming_matches, SUPPORTED_COMPETITIONS, FDORG_COMPETITIONS
+from app.services.football_api import (
+    get_upcoming_matches, get_all_today_matches,
+    SUPPORTED_COMPETITIONS, FDORG_COMPETITIONS,
+)
 
 router = APIRouter(prefix="/predictions", tags=["predictions"])
 
+# ── In-memory cache for today's predictions ───────────────────────────────────
+# Structure: { date_str: {"status": "computing"|"ready", "predictions": [...], "total": int, "done": int} }
+_today_cache: dict = {}
+_preload_running: bool = False
+
+
+def _today_str() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+async def preload_today_predictions() -> None:
+    """
+    Background task: fetches all today's matches across all leagues and runs
+    predictions for each one, updating the cache progressively so the frontend
+    can poll and display results as they arrive.
+    """
+    global _preload_running
+    if _preload_running:
+        return
+    _preload_running = True
+
+    date_str = _today_str()
+    _today_cache[date_str] = {"status": "computing", "predictions": [], "done": 0, "total": 0}
+
+    try:
+        matches = await get_all_today_matches()
+        valid = [
+            m for m in matches
+            if m.get("homeTeam", {}).get("id") and m.get("awayTeam", {}).get("id")
+        ]
+        _today_cache[date_str]["total"] = len(valid)
+        print(f"[preload] {len(valid)} matches to predict for {date_str}")
+
+        for m in valid:
+            home_id   = m["homeTeam"]["id"]
+            away_id   = m["awayTeam"]["id"]
+            home_name = m["homeTeam"].get("shortName") or m["homeTeam"].get("name", "")
+            away_name = m["awayTeam"].get("shortName") or m["awayTeam"].get("name", "")
+            comp_code = m.get("_competition_code", "PL")
+            match_date = (m.get("utcDate") or "")[:10]
+
+            try:
+                pred = await predict_match(
+                    home_team_id=home_id,
+                    away_team_id=away_id,
+                    competition_code=comp_code,
+                    api_match_id=m.get("id"),
+                    home_team_name=home_name,
+                    away_team_name=away_name,
+                    match_date=match_date,
+                )
+                _today_cache[date_str]["predictions"].append({
+                    "api_match_id":     m.get("id"),
+                    "match_date":       m.get("utcDate"),
+                    "home_team":        home_name,
+                    "away_team":        away_name,
+                    "home_team_crest":  m["homeTeam"].get("crest"),
+                    "away_team_crest":  m["awayTeam"].get("crest"),
+                    "competition":      m.get("_competition_name", comp_code),
+                    "competition_code": comp_code,
+                    "prediction":       pred,
+                })
+            except Exception as e:
+                print(f"[preload] prediction failed for {home_name} vs {away_name}: {e}")
+
+            _today_cache[date_str]["done"] += 1
+
+        _today_cache[date_str]["status"] = "ready"
+        print(f"[preload] done — {_today_cache[date_str]['done']} predictions cached")
+
+    except Exception as e:
+        print(f"[preload] failed: {e}")
+        if date_str in _today_cache:
+            _today_cache[date_str]["status"] = "error"
+    finally:
+        _preload_running = False
+
+
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 class PredictRequest(BaseModel):
     home_team_id: int
@@ -36,6 +120,31 @@ async def predict_single(body: PredictRequest):
         return result
     except Exception as e:
         raise HTTPException(500, f"Prediction failed: {e}")
+
+
+@router.get("/today")
+async def today_predictions():
+    """
+    Returns cached today predictions with progress info.
+    Status: 'idle' | 'computing' | 'ready' | 'error'
+    While computing, predictions list grows progressively — poll every 5–10s.
+    """
+    date_str = _today_str()
+    cached = _today_cache.get(date_str)
+    if not cached:
+        return {"status": "idle", "predictions": [], "done": 0, "total": 0, "date": date_str}
+    return {**cached, "date": date_str}
+
+
+@router.post("/preload")
+async def trigger_preload():
+    """Manually trigger today's prediction preload (idempotent)."""
+    date_str = _today_str()
+    cached = _today_cache.get(date_str)
+    if cached and cached["status"] in ("computing", "ready"):
+        return {"message": f"Already {cached['status']}", "status": cached["status"]}
+    asyncio.create_task(preload_today_predictions())
+    return {"message": "Preload started", "status": "computing"}
 
 
 @router.get("/upcoming")
