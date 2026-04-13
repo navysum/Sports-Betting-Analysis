@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: sportsbet-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    # Free tier spins down after 15 min of inactivity — first request takes ~30s to wake
+    plan: free
+    envVars:
+      - key: FOOTBALL_DATA_API_KEY
+        sync: false   # Set this in the Render dashboard (Environment tab)
+      - key: DATABASE_URL
+        value: sqlite+aiosqlite:///./data/soccerbet.db

@@ -10,13 +10,18 @@ venv/
 .env
 backend/.env
 
-# ML models (retrain on server)
-backend/ml/*.joblib
+# ML models — commit trained models so they're baked into the Docker image
+# Uncomment below to exclude models (if using a retrain-on-deploy strategy instead)
+# backend/ml/*.joblib
 backend/ml/training_log.json
 
-# Database
+# Database — runtime only, not committed
 *.db
-backend/data/
+
+# Data — commit ELO + Dixon-Coles params (small JSON), exclude large files
+backend/data/csv/
+backend/data/training_cache.npz
+backend/data/soccerbet.db
 
 # Node
 node_modules/
