@@ -133,8 +133,39 @@ def _merge(*arrays_tuple):
 # ─── API data fetcher ─────────────────────────────────────────────────────────
 
 async def fetch_api_training_data():
-    """Pull current-season finished matches from football-data.org API."""
-    from app.services.football_api import get_finished_matches, get_team_matches, get_standings
+    """Pull current-season finished matches from football-data.org API.
+
+    Uses its own rate limiter (separate from the production one in football_api.py)
+    so training API calls don't block live prediction requests.
+    """
+    import httpx
+    from app.config import settings
+
+    BASE_URL = "https://api.football-data.org/v4"
+    _last_t: list[float] = [0.0]   # mutable cell to track last request time
+
+    async def _train_get(url: str, params: dict = None) -> dict:
+        """Rate-limited GET with its own 7s gap — independent of production limiter."""
+        now = asyncio.get_event_loop().time()
+        wait = max(0.0, 7.0 - (now - _last_t[0]))
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_t[0] = asyncio.get_event_loop().time()
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                url,
+                headers={"X-Auth-Token": settings.football_data_api_key},
+                params=params,
+            )
+            if resp.status_code == 429:
+                await asyncio.sleep(65)
+                resp = await client.get(
+                    url,
+                    headers={"X-Auth-Token": settings.football_data_api_key},
+                    params=params,
+                )
+            resp.raise_for_status()
+            return resp.json()
 
     X, y_result, y_goals, y_btts = [], [], [], []
     skipped = 0
@@ -142,22 +173,27 @@ async def fetch_api_training_data():
 
     async def _cached_team_matches(team_id: int) -> list:
         if team_id not in team_cache:
-            await asyncio.sleep(7)
             try:
-                team_cache[team_id] = await get_team_matches(team_id, limit=25)
+                data = await _train_get(f"{BASE_URL}/teams/{team_id}/matches",
+                                        {"status": "FINISHED", "limit": 25})
+                team_cache[team_id] = data.get("matches", [])
             except Exception:
                 team_cache[team_id] = []
         return team_cache[team_id]
 
     for comp_idx, comp in enumerate(COMPETITIONS):
-        if comp_idx > 0:
-            await asyncio.sleep(8)
-
         print(f"  [{comp}] Fetching matches…")
         try:
-            matches = await get_finished_matches(comp, limit=150)
-            await asyncio.sleep(8)
-            standings_table = await get_standings(comp)
+            data = await _train_get(
+                f"{BASE_URL}/competitions/{comp}/matches", {"status": "FINISHED"}
+            )
+            matches = data.get("matches", [])[-150:]
+            std = await _train_get(f"{BASE_URL}/competitions/{comp}/standings")
+            standings_table = []
+            for s in std.get("standings", []):
+                if s.get("type") == "TOTAL":
+                    standings_table = s.get("table", [])
+                    break
             standing_map = {row["team"]["id"]: row for row in standings_table}
         except Exception as e:
             print(f"  [{comp}] Error: {e}")
