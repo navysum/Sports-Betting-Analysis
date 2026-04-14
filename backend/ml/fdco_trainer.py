@@ -239,11 +239,6 @@ def build_fdco_training_data(
                 # Pre-match ELO difference (computed BEFORE updating ELO)
                 elo_diff = elo.get_diff(home_name, away_name)
 
-                # Bookmaker odds as features (0.0 if missing)
-                h_odds = m.get("_b365h") or 0.0
-                d_odds = m.get("_b365d") or 0.0
-                a_odds = m.get("_b365a") or 0.0
-
                 vec = build_feature_vector(
                     home_id=home_id,
                     away_id=away_id,
@@ -257,9 +252,7 @@ def build_fdco_training_data(
                     away_standing=table.standing(away_name),
                     match_date=date_str,
                     elo_diff=elo_diff,
-                    home_odds=h_odds,
-                    draw_odds=d_odds,
-                    away_odds=a_odds,
+                    # Odds intentionally excluded from features — kept in odds_rows for backtesting only
                 )
 
                 X_all.append(vec)

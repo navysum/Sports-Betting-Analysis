@@ -1,7 +1,7 @@
 """
 Feature engineering for match outcome, over/under, and BTTS prediction.
 
-Feature vector (30 features):
+Feature vector (34 features):
   Form (6):        home_form5, home_form10, away_form5, away_form10, form_diff, form_momentum
   Goals (8):       home_gf, home_ga, away_gf, away_ga, home_gf_home, home_ga_home,
                    away_gf_away, away_ga_away
@@ -10,6 +10,12 @@ Feature vector (30 features):
   Derived (4):     ppg_diff, total_goals_avg, goal_diff_avg, clean_sheet_rate
   Rest (2):        home_days_rest, away_days_rest
   xG (2):          home_xg_for, away_xg_for   (0.0 if unavailable)
+  ELO (1):         elo_diff (home minus away, clamped ±600)
+  Attack (3):      home_scoring_std, away_scoring_std, fixture_congestion
+
+NOTE: Bookmaker odds are intentionally excluded from features. Including them
+causes the model to replicate market consensus instead of finding independent
+edge — which is counterproductive for value betting.
 
 form5/form10 are exponentially weighted (recent matches count more).
 """
@@ -125,6 +131,51 @@ def _days_since_last_match(matches: list[dict], ref_date: Optional[str]) -> floa
         return 7.0
 
 
+def _scoring_std(matches: list[dict], team_id: int, n: int = 10) -> float:
+    """Standard deviation of goals scored in last N matches. High = inconsistent scorer."""
+    recent = [m for m in matches if m.get("status") == "FINISHED"][-n:]
+    goals = []
+    for m in recent:
+        home_id = m.get("homeTeam", {}).get("id")
+        hg = m.get("score", {}).get("fullTime", {}).get("home")
+        ag = m.get("score", {}).get("fullTime", {}).get("away")
+        if hg is None or ag is None:
+            continue
+        goals.append(hg if team_id == home_id else ag)
+    if len(goals) < 2:
+        return 1.0  # neutral default
+    mean = sum(goals) / len(goals)
+    variance = sum((g - mean) ** 2 for g in goals) / len(goals)
+    return float(math.sqrt(variance))
+
+
+def _fixture_congestion(home_matches: list[dict], away_matches: list[dict],
+                        ref_date: Optional[str], window_days: int = 14) -> float:
+    """Combined count of matches both teams played in last `window_days` days.
+    Higher = more fatigue. Useful signal for mid-week / cup fixture squeezes."""
+    if not ref_date:
+        return 4.0  # typical: 2 matches each
+    try:
+        ref = date.fromisoformat(ref_date[:10])
+    except Exception:
+        return 4.0
+
+    def _count(matches):
+        c = 0
+        for m in matches:
+            if m.get("status") != "FINISHED":
+                continue
+            try:
+                md = date.fromisoformat(m["utcDate"][:10])
+                if 0 < (ref - md).days <= window_days:
+                    c += 1
+            except Exception:
+                pass
+        return c
+
+    return float(_count(home_matches) + _count(away_matches))
+
+
 def build_feature_vector(
     home_id: int,
     away_id: int,
@@ -138,10 +189,7 @@ def build_feature_vector(
     match_date: Optional[str] = None,
     # ELO signal (home_elo - away_elo, clamped to ±600). 0.0 when unavailable.
     elo_diff: float = 0.0,
-    # Bookmaker decimal odds. 0.0 when unavailable. Model learns to ignore zeros.
-    home_odds: float = 0.0,
-    draw_odds: float = 0.0,
-    away_odds: float = 0.0,
+    # NOTE: bookmaker odds deliberately excluded — see module docstring.
 ) -> np.ndarray:
     """
     Returns a 1-D float32 numpy feature vector (34 features).
@@ -188,6 +236,11 @@ def build_feature_vector(
     home_days_rest = _days_since_last_match(home_matches, match_date)
     away_days_rest = _days_since_last_match(away_matches, match_date)
 
+    # --- Attack consistency & fixture load ---
+    home_scoring_std  = _scoring_std(home_matches, home_id)
+    away_scoring_std  = _scoring_std(away_matches, away_id)
+    fixture_cong      = _fixture_congestion(home_matches, away_matches, match_date)
+
     return np.array([
         # Form (6)
         hf5, hf10, af5, af10, form_diff, home_momentum,
@@ -206,8 +259,8 @@ def build_feature_vector(
         home_xg, away_xg,
         # ELO (1) — home ELO minus away ELO, clamped ±600
         elo_diff,
-        # Market odds (3) — decimal bookmaker odds, 0.0 if unavailable
-        home_odds, draw_odds, away_odds,
+        # Attack consistency + fixture load (3)
+        home_scoring_std, away_scoring_std, fixture_cong,
     ], dtype=np.float32)
 
 
@@ -230,8 +283,8 @@ FEATURE_NAMES = [
     "home_xg_for", "away_xg_for",
     # ELO (1)
     "elo_diff",
-    # Market odds (3)
-    "b365_home_odds", "b365_draw_odds", "b365_away_odds",
+    # Attack consistency + fixture load (3)
+    "home_scoring_std", "away_scoring_std", "fixture_congestion",
 ]
 
 N_FEATURES = len(FEATURE_NAMES)  # 34
