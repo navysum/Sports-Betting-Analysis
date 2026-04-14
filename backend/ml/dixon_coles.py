@@ -39,7 +39,7 @@ DC_PARAMS_PATH = os.path.join(_DATA_DIR, "dixon_coles_params.json")
 
 HALF_LIFE_DAYS = 60.0    # Time decay: 60-day half-life
 MAX_GOALS = 8            # Truncate scoreline grid at 8 goals per side
-DC_BLEND_WEIGHT = 0.35   # 35% Dixon-Coles, 65% XGBoost in blended output
+DC_BLEND_WEIGHT = 0.50   # 50% Dixon-Coles, 50% XGBoost in blended output
 MAX_MATCHES = 3000       # Cap matches used for MLE (keeps fitting fast)
 
 

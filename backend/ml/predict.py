@@ -96,11 +96,26 @@ def _proba(model, calibrator, vec: np.ndarray) -> Optional[np.ndarray]:
     return None
 
 
-def _star_rating(confidence: float) -> int:
-    if confidence >= 0.70: return 5
-    if confidence >= 0.60: return 4
-    if confidence >= 0.50: return 3
-    if confidence >= 0.40: return 2
+def _star_rating(value_bets: list, best_edge: float, confidence: float) -> int:
+    """
+    Stars reflect betting quality (edge over market), not raw win probability.
+    If we have no odds, fall back to confidence-based rating.
+      5★ = large edge (≥15%) or very high confidence (≥72%)
+      4★ = solid edge (≥9%) or high confidence (≥62%)
+      3★ = moderate edge (≥5%) or decent confidence (≥52%)
+      2★ = small edge (≥3%) or marginal confidence (≥42%)
+      1★ = no value detected
+    """
+    if value_bets:
+        if best_edge >= 0.15: return 5
+        if best_edge >= 0.09: return 4
+        if best_edge >= 0.05: return 3
+        return 2
+    # No odds available — fall back to confidence
+    if confidence >= 0.72: return 5
+    if confidence >= 0.62: return 4
+    if confidence >= 0.52: return 3
+    if confidence >= 0.42: return 2
     return 1
 
 
@@ -109,6 +124,18 @@ def _is_value(model_prob: float, bookmaker_odds: Optional[float], min_edge: floa
         return False
     implied_prob = 1 / bookmaker_odds
     return model_prob > (implied_prob + min_edge)
+
+
+def _kelly_fraction(model_prob: float, bookmaker_odds: float, fraction: float = 0.25) -> float:
+    """Quarter-Kelly stake as a fraction of bankroll. Returns 0.0 if no edge."""
+    if bookmaker_odds <= 1.0:
+        return 0.0
+    b = bookmaker_odds - 1.0          # net odds (profit per unit staked)
+    q = 1.0 - model_prob
+    kelly = (b * model_prob - q) / b  # full Kelly
+    if kelly <= 0:
+        return 0.0
+    return round(min(kelly * fraction, 0.05), 4)  # cap at 5% of bankroll
 
 
 def predict(
@@ -175,25 +202,46 @@ def predict(
             xg_home = dc_info.get("xg_home")
             xg_away = dc_info.get("xg_away")
 
+    # ── Value bets (with Kelly sizing) ───────────────────────────────────────
+    value_bets = []
+    kelly_stakes = {}   # market → quarter-Kelly fraction
+    edges = {}          # market → raw edge (model_prob - implied_prob)
+
+    checks = [
+        ("home",   home_p,      odds.get("home")),
+        ("draw",   draw_p,      odds.get("draw")),
+        ("away",   away_p,      odds.get("away")),
+        ("over25", over25_prob, odds.get("over25")),
+        ("btts",   btts_prob,   odds.get("btts")),
+    ]
+    labels = {
+        "home":   "Home Win",
+        "draw":   "Draw",
+        "away":   "Away Win",
+        "over25": "Over 2.5",
+        "btts":   "BTTS Yes",
+    }
+
+    for key, prob, book_odds in checks:
+        if _is_value(prob, book_odds):
+            implied = 1 / book_odds
+            edge = prob - implied
+            edges[key] = edge
+            k = _kelly_fraction(prob, book_odds)
+            kelly_stakes[key] = k
+            value_bets.append(
+                f"{labels[key]} (model {prob:.0%} vs implied {implied:.0%}, "
+                f"edge +{edge:.0%}, Kelly {k:.1%})"
+            )
+
+    best_edge = max(edges.values()) if edges else 0.0
+
     # ── Final outcome ─────────────────────────────────────────────────────────
     pred_idx = int(np.argmax([home_p, draw_p, away_p]))
     outcome_map = {0: "HOME", 1: "DRAW", 2: "AWAY"}
     predicted_outcome = outcome_map[pred_idx]
     confidence = round(max(home_p, draw_p, away_p), 4)
-    stars = _star_rating(confidence)
-
-    # ── Value bets ────────────────────────────────────────────────────────────
-    value_bets = []
-    if _is_value(home_p, odds.get("home")):
-        value_bets.append(f"Home Win (model {home_p:.0%} vs implied {1/odds['home']:.0%})")
-    if _is_value(draw_p, odds.get("draw")):
-        value_bets.append(f"Draw (model {draw_p:.0%} vs implied {1/odds['draw']:.0%})")
-    if _is_value(away_p, odds.get("away")):
-        value_bets.append(f"Away Win (model {away_p:.0%} vs implied {1/odds['away']:.0%})")
-    if _is_value(over25_prob, odds.get("over25")):
-        value_bets.append(f"Over 2.5 (model {over25_prob:.0%} vs implied {1/odds['over25']:.0%})")
-    if _is_value(btts_prob, odds.get("btts")):
-        value_bets.append(f"BTTS Yes (model {btts_prob:.0%} vs implied {1/odds['btts']:.0%})")
+    stars = _star_rating(value_bets, best_edge, confidence)
 
     return {
         "home_win_prob":     round(home_p, 4),
@@ -207,6 +255,8 @@ def predict(
         "over25_predicted":  over25_prob >= 0.5,
         "btts_predicted":    btts_prob >= 0.5,
         "value_bets":        value_bets,
+        "kelly_stakes":      kelly_stakes,
+        "best_edge":         round(best_edge, 4),
         "calibrated":        _result_cal is not None,
         "dc_available":      dc_info is not None,
         "correct_scores":    correct_scores,
