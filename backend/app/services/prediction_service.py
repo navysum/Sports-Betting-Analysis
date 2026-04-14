@@ -92,11 +92,6 @@ async def predict_match(
             find_match_odds(home_team_name, away_team_name, competition_code), None
         )
 
-    # Extract decimal odds for feature engineering (0.0 if unavailable)
-    h_odds = (bookmaker_odds or {}).get("home") or 0.0
-    d_odds = (bookmaker_odds or {}).get("draw") or 0.0
-    a_odds = (bookmaker_odds or {}).get("away") or 0.0
-
     vec = build_feature_vector(
         home_id=home_team_id,
         away_id=away_team_id,
@@ -109,9 +104,6 @@ async def predict_match(
         away_xg=away_xg,
         match_date=match_date or None,
         elo_diff=elo_diff,
-        home_odds=h_odds,
-        draw_odds=d_odds,
-        away_odds=a_odds,
     )
 
     result = predict(

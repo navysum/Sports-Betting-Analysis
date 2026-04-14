@@ -84,10 +84,12 @@ async def _run_retrain():
         from ml.predict import load_model
         load_model()
 
-        # Also reset today's cache so it re-runs with new models
-        from app.api.predictions import _today_cache, preload_today_predictions
-        _today_cache.clear()
-        asyncio.create_task(preload_today_predictions())
+        # Also reset today's cache so it re-runs with new models.
+        # Reset _preload_running too — an old stalled preload would block a new one.
+        import app.api.predictions as _pred_mod
+        _pred_mod._today_cache.clear()
+        _pred_mod._preload_running = False
+        asyncio.create_task(_pred_mod.preload_today_predictions())
         _log("Today's prediction cache cleared — recomputing with new models.")
 
         _retrain_state.update({
