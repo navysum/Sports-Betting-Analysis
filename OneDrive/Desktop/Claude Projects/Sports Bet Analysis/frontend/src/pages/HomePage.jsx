@@ -153,15 +153,23 @@ function MatchRow({ item }) {
 
               {/* Value bets */}
               {vbets.length > 0 && (
-                <div className="flex flex-wrap gap-2 text-xs">
+                <div className="space-y-1">
                   {vbets.map((vb, i) => {
                     const label = vb.split("(")[0].trim();
-                    const nums = vb.match(/(\d+)%/g);
-                    const edge = nums?.length >= 2 ? parseInt(nums[0]) - parseInt(nums[1]) : null;
+                    const edgeMatch = vb.match(/edge \+(\d+)%/);
+                    const kellyMatch = vb.match(/Kelly ([\d.]+)%/);
+                    const edge = edgeMatch ? parseInt(edgeMatch[1]) : null;
+                    const kelly = kellyMatch ? parseFloat(kellyMatch[1]) : null;
                     return (
-                      <span key={i} className="text-green-500">
-                        ↑ {label}{edge != null ? ` +${edge}%` : ""}
-                      </span>
+                      <div key={i} className="flex items-center justify-between text-xs">
+                        <span className="text-green-500 font-medium">↑ {label}</span>
+                        <span>
+                          {edge != null && <span className="text-green-400">+{edge}% edge</span>}
+                          {kelly != null && (
+                            <span className="ml-2 text-zinc-500">Kelly {kelly}%</span>
+                          )}
+                        </span>
+                      </div>
                     );
                   })}
                 </div>
@@ -196,6 +204,7 @@ export default function HomePage() {
   const [done, setDone]       = useState(0);
   const [total, setTotal]     = useState(0);
   const pollRef               = useRef(null);
+  const preloadStarted        = useRef(false);
 
   const dateLabel = new Date().toLocaleDateString("en-GB", {
     weekday: "long", day: "numeric", month: "long",
@@ -217,6 +226,8 @@ export default function HomePage() {
   }
 
   async function startPreload() {
+    if (preloadStarted.current) return;
+    preloadStarted.current = true;
     try { await triggerPreload(); } catch {}
     fetchCache();
   }
@@ -230,6 +241,8 @@ export default function HomePage() {
     // Poll while computing
     pollRef.current = setInterval(async () => {
       const s = await fetchCache();
+      // Backend may have been sleeping on first load — kick off preload once it wakes
+      if (s === "idle") startPreload();
       if (s === "ready" || s === "error") {
         clearInterval(pollRef.current);
       }
