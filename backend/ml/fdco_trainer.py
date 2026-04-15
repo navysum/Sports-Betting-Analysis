@@ -20,7 +20,7 @@ import pandas as pd
 from typing import Optional
 
 from app.config import settings
-from ml.features import build_feature_vector, N_FEATURES
+from ml.features import build_feature_vector, N_FEATURES, _shots_sot_avg
 from ml.elo import EloSystem, save_elo_ratings
 
 # Seasons to load — chronological order for correct form/standings accumulation.
@@ -91,12 +91,20 @@ def _rows_to_match_dicts(df: pd.DataFrame) -> list[dict]:
             raw_date = str(row.get("Date", "")).strip()
             date_iso = _parse_date(raw_date) or "1970-01-01"
 
+            # Shots data (present in most seasons; None if column missing)
+            shots = {
+                "home":    _safe_float(row, "HS"),
+                "homeSot": _safe_float(row, "HST"),
+                "away":    _safe_float(row, "AS"),
+                "awaySot": _safe_float(row, "AST"),
+            }
             records.append({
                 "status": "FINISHED",
                 "utcDate": date_iso + "T15:00:00Z",
                 "homeTeam": {"id": _team_id(home), "name": home},
                 "awayTeam": {"id": _team_id(away), "name": away},
                 "score": {"fullTime": {"home": hg, "away": ag}},
+                "shots": shots,
                 # Odds (for backtesting only — not used in feature vector)
                 "_b365h": _safe_float(row, "B365H"),
                 "_b365d": _safe_float(row, "B365D"),
@@ -249,6 +257,12 @@ def build_fdco_training_data(
                 # Pre-match ELO difference (computed BEFORE updating ELO)
                 elo_diff = elo.get_diff(home_name, away_name)
 
+                # Rolling shots/SOT averages — used both as shot features and
+                # as SOT×0.27 xG proxy (fixes the 0.0 xG training gap)
+                home_shots, home_sot = _shots_sot_avg(home_hist[-25:], home_id)
+                away_shots, away_sot = _shots_sot_avg(away_hist[-25:], away_id)
+                _SOT_XG = 0.27  # empirical shots-on-target to xG conversion
+
                 vec = build_feature_vector(
                     home_id=home_id,
                     away_id=away_id,
@@ -263,7 +277,16 @@ def build_fdco_training_data(
                     match_date=date_str,
                     elo_diff=elo_diff,
                     total_teams=total_teams,
-                    # Odds intentionally excluded from features — kept in odds_rows for backtesting only
+                    # xG proxy: SOT × 0.27 (non-zero training signal for xG features)
+                    home_xg=home_sot * _SOT_XG,
+                    away_xg=away_sot * _SOT_XG,
+                    home_xg_against=away_sot * _SOT_XG,
+                    away_xg_against=home_sot * _SOT_XG,
+                    # Shots features
+                    home_shots_avg=home_shots,
+                    home_sot_avg=home_sot,
+                    away_shots_avg=away_shots,
+                    away_sot_avg=away_sot,
                 )
 
                 X_all.append(vec)
