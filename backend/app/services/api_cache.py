@@ -18,28 +18,25 @@ from typing import Any, Optional
 _CACHE_DIR = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "data", "api_cache")
 )
+os.makedirs(_CACHE_DIR, exist_ok=True)
 
 DEFAULT_TTL_HOURS = 20.0
 
 
 def _path(key: str) -> str:
-    os.makedirs(_CACHE_DIR, exist_ok=True)
     safe = key.replace("/", "_").replace("?", "_").replace(":", "_")
     return os.path.join(_CACHE_DIR, f"{safe}.json")
 
 
 def get(key: str, ttl_hours: float = DEFAULT_TTL_HOURS) -> Optional[Any]:
     """Return cached data if fresh, else None."""
-    path = _path(key)
-    if not os.path.exists(path):
-        return None
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(_path(key), encoding="utf-8") as f:
             entry = json.load(f)
         if (time.time() - entry["fetched_at"]) > ttl_hours * 3600:
             return None
         return entry["data"]
-    except Exception:
+    except (FileNotFoundError, KeyError, json.JSONDecodeError):
         return None
 
 
@@ -54,14 +51,11 @@ def set(key: str, data: Any) -> None:
 
 def age_hours(key: str) -> Optional[float]:
     """Return age of entry in hours, or None if not cached."""
-    path = _path(key)
-    if not os.path.exists(path):
-        return None
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(_path(key), encoding="utf-8") as f:
             entry = json.load(f)
         return (time.time() - entry["fetched_at"]) / 3600
-    except Exception:
+    except (FileNotFoundError, KeyError, json.JSONDecodeError):
         return None
 
 

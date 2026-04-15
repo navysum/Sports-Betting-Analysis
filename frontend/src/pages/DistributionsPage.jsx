@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { kickoffTime } from "../utils/time";
 import { getTodayPredictions } from "../services/api";
 
 // Poisson probability: P(k; λ) = e^(-λ) * λ^k / k!
@@ -19,11 +20,6 @@ function goalDist(lambda, maxGoal = 4) {
   }
   probs.push({ k: maxGoal, p: Math.max(0, 1 - cumulative), label: `${maxGoal}+` });
   return probs;
-}
-
-function kickoffTime(utcStr) {
-  if (!utcStr) return "—";
-  return new Date(utcStr).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 }
 
 // SVG bar chart for goal distributions
