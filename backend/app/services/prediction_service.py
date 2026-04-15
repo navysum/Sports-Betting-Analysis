@@ -73,8 +73,10 @@ async def predict_match(
         _safe(fetch_understat_team_xg(home_team_name, competition_code), {}),
         _safe(fetch_understat_team_xg(away_team_name, competition_code), {}),
     )
-    home_xg = home_xg_data.get("last5_xg_for", 0.0) if home_xg_data else 0.0
-    away_xg = away_xg_data.get("last5_xg_for", 0.0) if away_xg_data else 0.0
+    home_xg         = home_xg_data.get("last5_xg_for",     0.0) if home_xg_data else 0.0
+    away_xg         = away_xg_data.get("last5_xg_for",     0.0) if away_xg_data else 0.0
+    home_xg_against = home_xg_data.get("last5_xg_against", 0.0) if home_xg_data else 0.0
+    away_xg_against = away_xg_data.get("last5_xg_against", 0.0) if away_xg_data else 0.0
 
     standing_map = {row["team"]["id"]: row for row in (standings_table or [])}
 
@@ -92,6 +94,13 @@ async def predict_match(
             find_match_odds(home_team_name, away_team_name, competition_code), None
         )
 
+    # League size for normalised position feature
+    _LEAGUE_SIZES = {
+        "PL": 20, "ELC": 24, "PD": 20, "BL1": 18,
+        "SA": 20, "FL1": 20, "DED": 18, "PPL": 18,
+    }
+    total_teams = _LEAGUE_SIZES.get(competition_code, 20)
+
     vec = build_feature_vector(
         home_id=home_team_id,
         away_id=away_team_id,
@@ -102,8 +111,11 @@ async def predict_match(
         away_standing=standing_map.get(away_team_id),
         home_xg=home_xg,
         away_xg=away_xg,
+        home_xg_against=home_xg_against,
+        away_xg_against=away_xg_against,
         match_date=match_date or None,
         elo_diff=elo_diff,
+        total_teams=total_teams,
     )
 
     result = predict(

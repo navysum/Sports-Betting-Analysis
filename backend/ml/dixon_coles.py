@@ -37,7 +37,7 @@ except ImportError:
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 DC_PARAMS_PATH = os.path.join(_DATA_DIR, "dixon_coles_params.json")
 
-HALF_LIFE_DAYS = 60.0    # Time decay: 60-day half-life
+HALF_LIFE_DAYS = 40.0    # Time decay: 40-day half-life (tighter recency bias)
 MAX_GOALS = 8            # Truncate scoreline grid at 8 goals per side
 DC_BLEND_WEIGHT = 0.50   # 50% Dixon-Coles, 50% XGBoost in blended output
 MAX_MATCHES = 3000       # Cap matches used for MLE (keeps fitting fast)
@@ -141,13 +141,22 @@ class DixonColesModel:
             else datetime.now()
         )
 
-        # Time-decay weights
+        # Time-decay weights with season-start boost.
+        # When ref_dt falls in Aug–Sep (start of new season), matches from
+        # before July 1 of the same year are from the *previous* season and
+        # should decay faster (2× rate) — team rosters/managers may have changed.
+        season_start_month = ref_dt.month in (8, 9)
+
         weights = np.ones(len(matches), dtype=np.float64)
         for i, m in enumerate(matches):
             try:
                 d = datetime.fromisoformat(m.get("date", "2020-01-01")[:10])
                 days = max((ref_dt - d).days, 0)
-                weights[i] = math.exp(-math.log(2) * days / HALF_LIFE_DAYS)
+                # Apply 2× decay rate for pre-summer matches at season start
+                hl = HALF_LIFE_DAYS
+                if season_start_month and d.year == ref_dt.year and d.month < 7:
+                    hl = HALF_LIFE_DAYS / 2.0
+                weights[i] = math.exp(-math.log(2) * days / hl)
             except Exception:
                 weights[i] = 0.1
 
@@ -269,6 +278,15 @@ class DixonColesModel:
         )
         over25 = 1.0 - under25
 
+        # Over/under 3.5 goals
+        under35 = sum(
+            float(grid[i, j])
+            for i in range(min(4, MAX_GOALS + 1))
+            for j in range(min(4, MAX_GOALS + 1))
+            if i + j <= 3
+        )
+        over35 = 1.0 - under35
+
         # BTTS: P(home≥1) × P(away≥1) = 1 - P(home=0) - P(away=0) + P(0-0)
         btts = float(
             1.0 - grid[0, :].sum() - grid[:, 0].sum() + grid[0, 0]
@@ -293,6 +311,7 @@ class DixonColesModel:
             "draw":           round(max(draw,     0.0), 4),
             "away":           round(max(away_win, 0.0), 4),
             "over25":         round(max(min(over25, 1.0), 0.0), 4),
+            "over35":         round(max(min(over35, 1.0), 0.0), 4),
             "btts":           round(max(min(btts,   1.0), 0.0), 4),
             "xg_home":        round(lam, 2),
             "xg_away":        round(mu, 2),

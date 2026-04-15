@@ -20,30 +20,34 @@ from typing import Optional
 
 ML_DIR = os.path.dirname(__file__)
 
-RESULT_MODEL_PATH = os.path.join(ML_DIR, "result_model.joblib")
-GOALS_MODEL_PATH  = os.path.join(ML_DIR, "goals_model.joblib")
-BTTS_MODEL_PATH   = os.path.join(ML_DIR, "btts_model.joblib")
+RESULT_MODEL_PATH  = os.path.join(ML_DIR, "result_model.joblib")
+GOALS_MODEL_PATH   = os.path.join(ML_DIR, "goals_model.joblib")
+BTTS_MODEL_PATH    = os.path.join(ML_DIR, "btts_model.joblib")
+OVER35_MODEL_PATH  = os.path.join(ML_DIR, "over35_model.joblib")
 
-RESULT_CAL_PATH   = os.path.join(ML_DIR, "result_calibrator.joblib")
-GOALS_CAL_PATH    = os.path.join(ML_DIR, "goals_calibrator.joblib")
-BTTS_CAL_PATH     = os.path.join(ML_DIR, "btts_calibrator.joblib")
+RESULT_CAL_PATH    = os.path.join(ML_DIR, "result_calibrator.joblib")
+GOALS_CAL_PATH     = os.path.join(ML_DIR, "goals_calibrator.joblib")
+BTTS_CAL_PATH      = os.path.join(ML_DIR, "btts_calibrator.joblib")
+OVER35_CAL_PATH    = os.path.join(ML_DIR, "over35_calibrator.joblib")
 
 # Legacy path for backward compatibility
-LEGACY_MODEL_PATH = os.path.join(ML_DIR, "model.joblib")
+LEGACY_MODEL_PATH  = os.path.join(ML_DIR, "model.joblib")
 
-_result_model = None
-_goals_model  = None
-_btts_model   = None
-_result_cal   = None
-_goals_cal    = None
-_btts_cal     = None
-_dc_model     = None   # Dixon-Coles model (optional)
+_result_model  = None
+_goals_model   = None
+_btts_model    = None
+_over35_model  = None
+_result_cal    = None
+_goals_cal     = None
+_btts_cal      = None
+_over35_cal    = None
+_dc_model      = None   # Dixon-Coles model (optional)
 
 
 def load_model():
     """Load all models and calibrators. Falls back gracefully if absent."""
-    global _result_model, _goals_model, _btts_model
-    global _result_cal, _goals_cal, _btts_cal, _dc_model
+    global _result_model, _goals_model, _btts_model, _over35_model
+    global _result_cal, _goals_cal, _btts_cal, _over35_cal, _dc_model
 
     if os.path.exists(RESULT_MODEL_PATH):
         _result_model = joblib.load(RESULT_MODEL_PATH)
@@ -66,10 +70,17 @@ def load_model():
     else:
         print("WARNING: No BTTS model found.")
 
+    if os.path.exists(OVER35_MODEL_PATH):
+        _over35_model = joblib.load(OVER35_MODEL_PATH)
+        print("Over35 model loaded.")
+    else:
+        print("WARNING: No over35 model found (retrain to generate).")
+
     for path, name, var_name in [
-        (RESULT_CAL_PATH, "result", "_result_cal"),
-        (GOALS_CAL_PATH,  "goals",  "_goals_cal"),
-        (BTTS_CAL_PATH,   "btts",   "_btts_cal"),
+        (RESULT_CAL_PATH, "result",  "_result_cal"),
+        (GOALS_CAL_PATH,  "goals",   "_goals_cal"),
+        (BTTS_CAL_PATH,   "btts",    "_btts_cal"),
+        (OVER35_CAL_PATH, "over35",  "_over35_cal"),
     ]:
         if os.path.exists(path):
             globals()[var_name] = joblib.load(path)
@@ -168,12 +179,15 @@ def predict(
     else:
         home_p = draw_p = away_p = 1 / 3
 
-    # ── XGBoost goals + BTTS models ───────────────────────────────────────────
+    # ── XGBoost goals + BTTS + over35 models ─────────────────────────────────
     goals_probs = _proba(_goals_model, _goals_cal, vec)
     over25_prob = float(goals_probs[1]) if goals_probs is not None else 0.5
 
     btts_probs = _proba(_btts_model, _btts_cal, vec)
     btts_prob  = float(btts_probs[1]) if btts_probs is not None else 0.5
+
+    over35_probs = _proba(_over35_model, _over35_cal, vec)
+    over35_prob  = float(over35_probs[1]) if over35_probs is not None else 0.35
 
     # ── Dixon-Coles blend ─────────────────────────────────────────────────────
     dc_info = None
@@ -192,6 +206,9 @@ def predict(
             away_p    = w_xgb * away_p    + w_dc * dc_info["away"]
             over25_prob = w_xgb * over25_prob + w_dc * dc_info["over25"]
             btts_prob   = w_xgb * btts_prob   + w_dc * dc_info["btts"]
+            # DC over35 from score grid
+            if "over35" in dc_info:
+                over35_prob = w_xgb * over35_prob + w_dc * dc_info["over35"]
 
             # Renormalise result probs to sum to 1
             total = home_p + draw_p + away_p
@@ -212,6 +229,7 @@ def predict(
         ("draw",   draw_p,      odds.get("draw")),
         ("away",   away_p,      odds.get("away")),
         ("over25", over25_prob, odds.get("over25")),
+        ("over35", over35_prob, odds.get("over35")),
         ("btts",   btts_prob,   odds.get("btts")),
     ]
     labels = {
@@ -219,6 +237,7 @@ def predict(
         "draw":   "Draw",
         "away":   "Away Win",
         "over25": "Over 2.5",
+        "over35": "Over 3.5",
         "btts":   "BTTS Yes",
     }
 
@@ -251,8 +270,10 @@ def predict(
         "confidence":        confidence,
         "stars":             stars,
         "over25_prob":       round(over25_prob, 4),
+        "over35_prob":       round(over35_prob, 4),
         "btts_prob":         round(btts_prob, 4),
         "over25_predicted":  over25_prob >= 0.5,
+        "over35_predicted":  over35_prob >= 0.5,
         "btts_predicted":    btts_prob >= 0.5,
         "value_bets":        value_bets,
         "kelly_stakes":      kelly_stakes,
