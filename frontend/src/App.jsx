@@ -8,6 +8,7 @@ import StandingsPage from "./pages/StandingsPage";
 import StatsPage from "./pages/StatsPage";
 import TeamPage from "./pages/TeamPage";
 import DistributionsPage from "./pages/DistributionsPage";
+import MonteCarloPage from "./pages/MonteCarloPage";
 
 export default function App() {
   return (
@@ -22,6 +23,7 @@ export default function App() {
             <Route path="/standings"    element={<StandingsPage />} />
             <Route path="/stats"          element={<StatsPage />} />
             <Route path="/distributions" element={<DistributionsPage />} />
+            <Route path="/montecarlo"    element={<MonteCarloPage />} />
             <Route path="/team/:teamId"  element={<TeamPage />} />
             <Route path="/matches"       element={<ResultsPage />} />
           </Routes>
