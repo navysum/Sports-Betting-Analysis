@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { getTodayPredictions } from "../services/api";
+import { kickoffTime } from "../utils/time";
 
 const N_SIMS = 100_000;
 
@@ -79,22 +80,16 @@ function runSimulation(lambdaHome, lambdaAway, N = N_SIMS) {
 
 // ─── Visual components ────────────────────────────────────────────────────────
 
-function kickoffTime(utcStr) {
-  if (!utcStr) return "—";
-  return new Date(utcStr).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
-}
-
 /** Horizontal bar with optional CI whisker */
 function ResultBar({ label, pct, ciPct, color, highlight }) {
-  const rounded = pct.toFixed(1);
   return (
     <div className="flex items-center gap-2 text-xs">
       <span className={`w-12 shrink-0 ${highlight ? "text-zinc-200" : "text-zinc-500"}`}>{label}</span>
-      <div className="flex-1 h-2.5 bg-zinc-800 rounded-full overflow-hidden relative">
+      <div className="flex-1 h-2.5 bg-zinc-800 rounded-full overflow-hidden">
         <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(pct, 100)}%` }} />
       </div>
       <span className="text-zinc-400 tabular-nums w-16 text-right">
-        {rounded}%
+        {pct.toFixed(1)}%
         {ciPct != null && (
           <span className="text-zinc-600 ml-0.5 text-[9px]">±{ciPct.toFixed(1)}</span>
         )}
@@ -127,42 +122,38 @@ function GoalTotalChart({ goalTotals }) {
 /** 6×6 score heatmap — home goals on Y, away goals on X */
 function ScoreHeatmap({ scoreMap, N, homeLabel, awayLabel }) {
   const MAX = 6;
-  const cells = [];
   let peak = 0;
+  let topPct = 0;
   for (let h = 0; h <= MAX; h++) {
     for (let a = 0; a <= MAX; a++) {
       const c = scoreMap[`${h}-${a}`] || 0;
-      if (c > peak) peak = c;
-      cells.push({ h, a, pct: (c / N) * 100 });
+      if (c > peak) { peak = c; topPct = (c / N) * 100; }
     }
   }
 
   return (
     <div className="overflow-x-auto">
-      {/* Away label */}
       <p className="text-[9px] text-zinc-600 mb-1 ml-7">{awayLabel} goals →</p>
       <div className="flex gap-0.5 mb-0.5 ml-7">
         {Array.from({ length: MAX + 1 }, (_, i) => (
           <div key={i} className="w-7 text-center text-[9px] text-zinc-600">{i}</div>
         ))}
       </div>
-      {/* Rows (home goals) */}
       {Array.from({ length: MAX + 1 }, (_, h) => (
         <div key={h} className="flex items-center gap-0.5 mb-0.5">
           <div className="w-6 text-[9px] text-zinc-600 text-right pr-1">{h}</div>
           {Array.from({ length: MAX + 1 }, (_, a) => {
-            const pct = ((scoreMap[`${h}-${a}`] || 0) / N) * 100;
-            const intensity = peak > 0 ? (scoreMap[`${h}-${a}`] || 0) / peak : 0;
-            const isTop = pct === Math.max(...cells.map(c => c.pct));
+            const c = scoreMap[`${h}-${a}`] || 0;
+            const pct = (c / N) * 100;
+            const intensity = peak > 0 ? c / peak : 0;
+            const isTop = pct === topPct;
             return (
               <div
                 key={a}
                 title={`${h}-${a}: ${pct.toFixed(1)}%`}
                 className={`w-7 h-7 rounded flex items-center justify-center text-[9px] tabular-nums
                             ${isTop ? "ring-1 ring-green-500/60 font-bold text-white" : "text-zinc-500"}`}
-                style={{
-                  backgroundColor: `rgba(34,197,94,${0.05 + intensity * 0.55})`,
-                }}
+                style={{ backgroundColor: `rgba(34,197,94,${0.05 + intensity * 0.55})` }}
               >
                 {pct >= 1 ? `${Math.round(pct)}%` : ""}
               </div>
@@ -170,9 +161,7 @@ function ScoreHeatmap({ scoreMap, N, homeLabel, awayLabel }) {
           })}
         </div>
       ))}
-      <p className="text-[9px] text-zinc-600 mt-1 ml-7 -rotate-0">
-        ↑ {homeLabel} goals
-      </p>
+      <p className="text-[9px] text-zinc-600 mt-1 ml-7">↑ {homeLabel} goals</p>
     </div>
   );
 }

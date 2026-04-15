@@ -8,6 +8,7 @@ import httpx
 from datetime import datetime, timedelta
 from typing import Optional
 from app.config import settings
+from app.services.api_cache import get as _cache_get, set as _cache_set
 
 BASE_URL = "https://api.football-data.org/v4"
 
@@ -88,7 +89,6 @@ async def get_tomorrow_matches(competition_code: str = "PL") -> list[dict]:
 
 async def get_finished_matches(competition_code: str = "PL", limit: int = 100) -> list[dict]:
     # football-data.org v4 does not accept a 'limit' param — returns full season, we slice
-    from app.services.api_cache import get as _cache_get, set as _cache_set
     key = f"finished_{competition_code}"
     cached = _cache_get(key)
     if cached is not None:
@@ -111,7 +111,6 @@ async def get_live_matches(competition_code: str = "PL") -> list[dict]:
 
 
 async def get_standings(competition_code: str = "PL") -> list[dict]:
-    from app.services.api_cache import get as _cache_get, set as _cache_set
     key = f"standings_{competition_code}"
     cached = _cache_get(key)
     if cached is not None:
@@ -128,7 +127,6 @@ async def get_standings(competition_code: str = "PL") -> list[dict]:
 async def get_team_matches(team_id: int, limit: int = 20, status: str = "FINISHED") -> list[dict]:
     # Only cache FINISHED history — SCHEDULED/IN_PLAY change too fast
     if status == "FINISHED":
-        from app.services.api_cache import get as _cache_get, set as _cache_set
         key = f"team_{team_id}"
         cached = _cache_get(key)
         if cached is not None:
