@@ -254,8 +254,8 @@ def _train_and_calibrate(
         early_stopping_rounds=30,
         verbose=False,
     )
-    best_trees = final_model.best_ntree_limit
-    print(f"  {label} early stopping → {best_trees} trees")
+    best_trees = getattr(final_model, "best_iteration", None) or getattr(final_model, "best_ntree_limit", None)
+    print(f"  {label} early stopping -> {best_trees} trees")
     joblib.dump(final_model, model_path)
 
     # SHAP on calibration holdout

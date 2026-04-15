@@ -329,9 +329,13 @@ async def download_all_csvs(seasons: list[str] = None) -> None:
     from app.services.scraper import download_fdco_csv
     if seasons is None:
         seasons = list(reversed(SEASONS))  # newest first
+    current_season = seasons[0]  # newest = still in progress, always refresh
     print(f"  [fdco] Downloading CSVs for {len(FDCO_LEAGUES)} leagues × {len(seasons)} seasons…")
     for season in seasons:
         for league_code in FDCO_LEAGUES:
+            csv_path = os.path.join(settings.csv_dir, f"{league_code}_{season}.csv")
+            if season != current_season and os.path.exists(csv_path):
+                continue  # historical season already cached
             await download_fdco_csv(league_code, season)
             await asyncio.sleep(1)
     print("  [fdco] Download complete.")
