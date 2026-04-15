@@ -5,7 +5,8 @@ import { searchTeam } from "../services/api";
 const NAV = [
   { to: "/",               label: "Today" },
   { to: "/predictions",    label: "Picks" },
-  { to: "/distributions",  label: "Distributions" },
+  { to: "/distributions",  label: "Charts" },
+  { to: "/montecarlo",     label: "Sim" },
   { to: "/results",        label: "Results" },
   { to: "/standings",      label: "Table" },
   { to: "/stats",          label: "Stats" },
