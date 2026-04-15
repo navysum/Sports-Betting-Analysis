@@ -1,0 +1,31 @@
+name: Daily Data Cache Refresh
+
+# Runs at 01:00 AM UTC every day.
+# Wakes the Render backend (which sleeps on the free tier) and tells it
+# to pre-fetch standings, finished matches, and today's team histories.
+# This means the first user of the day gets instant predictions instead
+# of waiting for all the rate-limited API calls to complete.
+
+on:
+  schedule:
+    - cron: "0 1 * * *"   # 01:00 AM UTC daily
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Wake backend (cold-start ping)
+        run: |
+          echo "Pinging backend to wake from sleep..."
+          curl -sf --retry 5 --retry-delay 10 \
+            https://sports-betting-analysis.onrender.com/health || true
+
+      - name: Trigger cache refresh
+        run: |
+          echo "Triggering data cache refresh..."
+          curl -sf -X POST \
+            https://sports-betting-analysis.onrender.com/api/admin/refresh-cache
+          echo "Cache refresh triggered successfully."
