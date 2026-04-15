@@ -18,10 +18,11 @@ backend/ml/training_log.json
 # Database — runtime only, not committed
 *.db
 
-# Data — commit ELO + Dixon-Coles params (small JSON), exclude large files
+# Data — commit ELO + Dixon-Coles params (small JSON), exclude large/ephemeral files
 backend/data/csv/
 backend/data/training_cache.npz
 backend/data/soccerbet.db
+backend/data/api_cache/
 
 # Node
 node_modules/

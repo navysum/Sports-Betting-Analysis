@@ -26,11 +26,28 @@ async def preload_today_predictions() -> None:
     Background task: fetches all today's matches across all leagues and runs
     predictions for each one, updating the cache progressively so the frontend
     can poll and display results as they arrive.
+
+    If the API response cache is stale (>20 h), kicks off a background
+    cache refresh first so this and any subsequent preloads use fresh data.
     """
     global _preload_running
     if _preload_running:
         return
     _preload_running = True
+
+    # Trigger a cache refresh in the background if standings data is stale.
+    # This is a no-op if one is already running.
+    try:
+        from app.services.api_cache import any_stale
+        from app.api.admin import _refresh_state, _run_cache_refresh, _refresh_lock
+        standings_keys = [f"standings_{c}" for c in FDORG_COMPETITIONS]
+        if any_stale(standings_keys):
+            async with _refresh_lock:
+                if _refresh_state["status"] != "running":
+                    print("[preload] API cache is stale — triggering background refresh")
+                    asyncio.create_task(_run_cache_refresh())
+    except Exception:
+        pass  # never block predictions due to a cache check error
 
     date_str = _today_str()
     _today_cache[date_str] = {"status": "computing", "predictions": [], "done": 0, "total": 0}

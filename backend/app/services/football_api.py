@@ -88,11 +88,17 @@ async def get_tomorrow_matches(competition_code: str = "PL") -> list[dict]:
 
 async def get_finished_matches(competition_code: str = "PL", limit: int = 100) -> list[dict]:
     # football-data.org v4 does not accept a 'limit' param — returns full season, we slice
+    from app.services.api_cache import get as _cache_get, set as _cache_set
+    key = f"finished_{competition_code}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached[-limit:] if limit else cached
     data = await _get(
         f"{BASE_URL}/competitions/{competition_code}/matches",
         {"status": "FINISHED"},
     )
     matches = data.get("matches", [])
+    _cache_set(key, matches)
     return matches[-limit:] if limit else matches
 
 
@@ -105,14 +111,35 @@ async def get_live_matches(competition_code: str = "PL") -> list[dict]:
 
 
 async def get_standings(competition_code: str = "PL") -> list[dict]:
+    from app.services.api_cache import get as _cache_get, set as _cache_set
+    key = f"standings_{competition_code}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
     data = await _get(f"{BASE_URL}/competitions/{competition_code}/standings")
     for s in data.get("standings", []):
         if s.get("type") == "TOTAL":
-            return s.get("table", [])
+            table = s.get("table", [])
+            _cache_set(key, table)
+            return table
     return []
 
 
 async def get_team_matches(team_id: int, limit: int = 20, status: str = "FINISHED") -> list[dict]:
+    # Only cache FINISHED history — SCHEDULED/IN_PLAY change too fast
+    if status == "FINISHED":
+        from app.services.api_cache import get as _cache_get, set as _cache_set
+        key = f"team_{team_id}"
+        cached = _cache_get(key)
+        if cached is not None:
+            return cached[:limit] if limit else cached
+        data = await _get(
+            f"{BASE_URL}/teams/{team_id}/matches",
+            {"status": status, "limit": limit},
+        )
+        matches = data.get("matches", [])
+        _cache_set(key, matches)
+        return matches[:limit] if limit else matches
     data = await _get(
         f"{BASE_URL}/teams/{team_id}/matches",
         {"status": status, "limit": limit},
