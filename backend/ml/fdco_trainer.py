@@ -23,15 +23,16 @@ from app.config import settings
 from ml.features import build_feature_vector, N_FEATURES
 from ml.elo import EloSystem, save_elo_ratings
 
-# Seasons to load — chronological order for correct form/standings accumulation
-SEASONS = ["1718", "1819", "1920", "2021", "2122", "2223", "2324", "2425"]
+# Seasons to load — chronological order for correct form/standings accumulation.
+# Extended back to 2010/11 (~15 seasons, ~3× more data than before).
+# Download silently skips missing files, so adding extra seasons is safe.
+SEASONS = [
+    "1011", "1112", "1213", "1314", "1415", "1516", "1617",
+    "1718", "1819", "1920", "2021", "2122", "2223", "2324", "2425",
+]
 
 # football-data.co.uk season codes  (URL path segment)
-FDCO_SEASON_CODES = {
-    "1718": "1718", "1819": "1819", "1920": "1920",
-    "2021": "2021", "2122": "2122", "2223": "2223",
-    "2324": "2324", "2425": "2425",
-}
+FDCO_SEASON_CODES = {s: s for s in SEASONS}
 
 # League CSV division codes
 FDCO_LEAGUES = {
@@ -43,6 +44,12 @@ FDCO_LEAGUES = {
     "FL1": "F1",
     "DED": "N1",
     "PPL": "P1",
+}
+
+# Number of teams per league — used to normalise standing position
+LEAGUE_SIZES = {
+    "PL": 20, "ELC": 24, "PD": 20, "BL1": 18,
+    "SA": 20, "FL1": 20, "DED": 18, "PPL": 18,
 }
 
 
@@ -162,7 +169,7 @@ class _RunningTable:
 
 def build_fdco_training_data(
     min_history: int = 5,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict]]:
     """
     Load all cached FDCO CSVs and build feature vectors.
 
@@ -171,10 +178,11 @@ def build_fdco_training_data(
         y_result  — int array  0=HOME, 1=DRAW, 2=AWAY
         y_goals   — int array  0=Under2.5, 1=Over2.5
         y_btts    — int array  0=No, 1=Yes
+        y_over35  — int array  0=Under3.5, 1=Over3.5
         odds_rows — list of dicts for backtesting  {date, home, away, b365h, b365d, b365a, ...}
     """
     csv_dir = settings.csv_dir
-    X_all, y_result_all, y_goals_all, y_btts_all = [], [], [], []
+    X_all, y_result_all, y_goals_all, y_btts_all, y_over35_all = [], [], [], [], []
     odds_rows = []
     total_files = 0
 
@@ -182,6 +190,7 @@ def build_fdco_training_data(
     league_elo: dict[str, EloSystem] = {}
 
     for league_code, division in FDCO_LEAGUES.items():
+        total_teams = LEAGUE_SIZES.get(league_code, 20)
         # Fresh ELO for each league — cross-league mixing not meaningful for domestic
         elo = EloSystem()
         league_elo[league_code] = elo
@@ -233,8 +242,9 @@ def build_fdco_training_data(
                 elif hg == ag: result_label = 1
                 else:          result_label = 2
 
-                goals_label = 1 if (hg + ag) > 2 else 0
-                btts_label  = 1 if (hg > 0 and ag > 0) else 0
+                goals_label  = 1 if (hg + ag) > 2 else 0
+                btts_label   = 1 if (hg > 0 and ag > 0) else 0
+                over35_label = 1 if (hg + ag) > 3 else 0
 
                 # Pre-match ELO difference (computed BEFORE updating ELO)
                 elo_diff = elo.get_diff(home_name, away_name)
@@ -252,6 +262,7 @@ def build_fdco_training_data(
                     away_standing=table.standing(away_name),
                     match_date=date_str,
                     elo_diff=elo_diff,
+                    total_teams=total_teams,
                     # Odds intentionally excluded from features — kept in odds_rows for backtesting only
                 )
 
@@ -259,6 +270,7 @@ def build_fdco_training_data(
                 y_result_all.append(result_label)
                 y_goals_all.append(goals_label)
                 y_btts_all.append(btts_label)
+                y_over35_all.append(over35_label)
 
                 # Record odds for backtesting + DC model building
                 odds_rows.append({
@@ -287,7 +299,7 @@ def build_fdco_training_data(
         print(f"  [fdco] No CSV data found in {csv_dir}. Run scraper first.")
         return (
             np.empty((0, N_FEATURES), dtype=np.float32),
-            np.array([]), np.array([]), np.array([]),
+            np.array([]), np.array([]), np.array([]), np.array([]),
             [],
         )
 
@@ -307,6 +319,7 @@ def build_fdco_training_data(
         np.array(y_result_all),
         np.array(y_goals_all),
         np.array(y_btts_all),
+        np.array(y_over35_all),
         odds_rows,
     )
 
@@ -315,7 +328,7 @@ async def download_all_csvs(seasons: list[str] = None) -> None:
     """Download FDCO CSVs for all leagues and seasons."""
     from app.services.scraper import download_fdco_csv
     if seasons is None:
-        seasons = ["2425", "2324", "2223", "2122", "2021", "1920", "1819", "1718"]
+        seasons = list(reversed(SEASONS))  # newest first
     print(f"  [fdco] Downloading CSVs for {len(FDCO_LEAGUES)} leagues × {len(seasons)} seasons…")
     for season in seasons:
         for league_code in FDCO_LEAGUES:

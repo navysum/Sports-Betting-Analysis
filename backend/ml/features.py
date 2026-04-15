@@ -1,15 +1,17 @@
 """
 Feature engineering for match outcome, over/under, and BTTS prediction.
 
-Feature vector (34 features):
-  Form (6):        home_form5, home_form10, away_form5, away_form10, form_diff, form_momentum
+Feature vector (38 features):
+  Form (7):        home_form5, home_form10, away_form5, away_form10, form_diff,
+                   home_momentum, away_momentum
   Goals (8):       home_gf, home_ga, away_gf, away_ga, home_gf_home, home_ga_home,
                    away_gf_away, away_ga_away
   H2H (3):         h2h_home_rate, h2h_draw_rate, h2h_away_rate
-  Standing (5):    home_pos, away_pos, home_ppg, away_ppg, pos_diff
-  Derived (4):     ppg_diff, total_goals_avg, goal_diff_avg, clean_sheet_rate
+  Standing (5):    home_pos_norm, away_pos_norm, home_ppg, away_ppg, pos_diff_norm
+  Derived (5):     ppg_diff, total_goals_avg, goal_diff_avg, away_goal_diff_avg,
+                   clean_sheet_rate
   Rest (2):        home_days_rest, away_days_rest
-  xG (2):          home_xg_for, away_xg_for   (0.0 if unavailable)
+  xG (4):          home_xg_for, away_xg_for, home_xg_against, away_xg_against
   ELO (1):         elo_diff (home minus away, clamped ±600)
   Attack (3):      home_scoring_std, away_scoring_std, fixture_congestion
 
@@ -17,7 +19,12 @@ NOTE: Bookmaker odds are intentionally excluded from features. Including them
 causes the model to replicate market consensus instead of finding independent
 edge — which is counterproductive for value betting.
 
+NOTE: xG features (home_xg_for etc.) are populated at inference time via
+Understat but are 0.0 in training data. XGBoost does not split on constant
+features, so they contribute only when live data is available.
+
 form5/form10 are exponentially weighted (recent matches count more).
+Positions are normalised to [0,1] by total teams in the league (default 20).
 """
 import math
 import numpy as np
@@ -66,7 +73,6 @@ def _form_points(matches: list[dict], team_id: int, n: int = 5) -> float:
     total_weight = 0.0
     weighted_pts = 0.0
     for i, m in enumerate(recent):
-        # earlier matches have lower weight
         w = decay ** (len(recent) - 1 - i)
         r = _result_for_team(m, team_id)
         pts = 3 if r == "W" else (1 if r == "D" else 0)
@@ -143,7 +149,7 @@ def _scoring_std(matches: list[dict], team_id: int, n: int = 10) -> float:
             continue
         goals.append(hg if team_id == home_id else ag)
     if len(goals) < 2:
-        return 1.0  # neutral default
+        return 1.0
     mean = sum(goals) / len(goals)
     variance = sum((g - mean) ** 2 for g in goals) / len(goals)
     return float(math.sqrt(variance))
@@ -151,10 +157,9 @@ def _scoring_std(matches: list[dict], team_id: int, n: int = 10) -> float:
 
 def _fixture_congestion(home_matches: list[dict], away_matches: list[dict],
                         ref_date: Optional[str], window_days: int = 14) -> float:
-    """Combined count of matches both teams played in last `window_days` days.
-    Higher = more fatigue. Useful signal for mid-week / cup fixture squeezes."""
+    """Combined count of matches both teams played in last `window_days` days."""
     if not ref_date:
-        return 4.0  # typical: 2 matches each
+        return 4.0
     try:
         ref = date.fromisoformat(ref_date[:10])
     except Exception:
@@ -186,13 +191,16 @@ def build_feature_vector(
     away_standing: Optional[dict] = None,
     home_xg: float = 0.0,
     away_xg: float = 0.0,
+    home_xg_against: float = 0.0,
+    away_xg_against: float = 0.0,
     match_date: Optional[str] = None,
-    # ELO signal (home_elo - away_elo, clamped to ±600). 0.0 when unavailable.
     elo_diff: float = 0.0,
-    # NOTE: bookmaker odds deliberately excluded — see module docstring.
+    # Total teams in the league — used to normalise standing position to [0,1].
+    # Typical values: PL/PD/SA/FL1=20, BL1/DED=18, ELC=24. Default 20.
+    total_teams: int = 20,
 ) -> np.ndarray:
     """
-    Returns a 1-D float32 numpy feature vector (34 features).
+    Returns a 1-D float32 numpy feature vector (38 features).
     Feature order MUST stay consistent with training — do not reorder.
     """
     # --- Form (exponentially weighted) ---
@@ -200,8 +208,9 @@ def build_feature_vector(
     hf10 = _form_points(home_matches, home_id, 10)
     af5  = _form_points(away_matches, away_id, 5)
     af10 = _form_points(away_matches, away_id, 10)
-    form_diff = hf5 - af5
-    home_momentum = _form_momentum(home_matches, home_id)
+    form_diff      = hf5 - af5
+    home_momentum  = _form_momentum(home_matches, home_id)
+    away_momentum  = _form_momentum(away_matches, away_id)
 
     # --- Goals (overall) ---
     home_gf, home_ga = _goals_for_against(home_matches, home_id)
@@ -216,48 +225,50 @@ def build_feature_vector(
     # --- H2H ---
     h2h_h, h2h_d, h2h_a = _h2h_stats(h2h_matches, home_id, away_id)
 
-    # --- Standings ---
+    # --- Standings (normalised position: 1st place → 1/total, last → 1.0) ---
     def _pos(s): return s.get("position", 10) if s else 10
     def _ppg(s): return s.get("points", 0) / max(s.get("playedGames", 1), 1) if s else 0.0
 
-    home_pos = _pos(home_standing)
-    away_pos = _pos(away_standing)
-    home_ppg = _ppg(home_standing)
-    away_ppg = _ppg(away_standing)
+    denom = max(total_teams, 1)
+    home_pos_norm = _pos(home_standing) / denom
+    away_pos_norm = _pos(away_standing) / denom
+    home_ppg      = _ppg(home_standing)
+    away_ppg      = _ppg(away_standing)
 
     # --- Derived ---
-    pos_diff      = home_pos - away_pos
-    ppg_diff      = home_ppg - away_ppg
-    total_goals   = home_gf + away_ga
-    goal_diff_avg = home_gf - home_ga
-    cs_rate       = _clean_sheet_rate(home_matches, home_id)
+    pos_diff_norm  = home_pos_norm - away_pos_norm
+    ppg_diff       = home_ppg - away_ppg
+    total_goals    = home_gf + away_ga
+    goal_diff_avg  = home_gf - home_ga        # home team's GD per game
+    away_goal_diff_avg = away_gf - away_ga    # away team's GD per game
+    cs_rate        = _clean_sheet_rate(home_matches, home_id)
 
     # --- Rest / fatigue ---
     home_days_rest = _days_since_last_match(home_matches, match_date)
     away_days_rest = _days_since_last_match(away_matches, match_date)
 
     # --- Attack consistency & fixture load ---
-    home_scoring_std  = _scoring_std(home_matches, home_id)
-    away_scoring_std  = _scoring_std(away_matches, away_id)
-    fixture_cong      = _fixture_congestion(home_matches, away_matches, match_date)
+    home_scoring_std = _scoring_std(home_matches, home_id)
+    away_scoring_std = _scoring_std(away_matches, away_id)
+    fixture_cong     = _fixture_congestion(home_matches, away_matches, match_date)
 
     return np.array([
-        # Form (6)
-        hf5, hf10, af5, af10, form_diff, home_momentum,
+        # Form (7)
+        hf5, hf10, af5, af10, form_diff, home_momentum, away_momentum,
         # Goals (8)
         home_gf, home_ga, away_gf, away_ga,
         home_gf_h, home_ga_h, away_gf_a, away_ga_a,
         # H2H (3)
         h2h_h, h2h_d, h2h_a,
-        # Standing (5)
-        home_pos, away_pos, home_ppg, away_ppg, pos_diff,
-        # Derived (4)
-        ppg_diff, total_goals, goal_diff_avg, cs_rate,
+        # Standing (5) — positions normalised by league size
+        home_pos_norm, away_pos_norm, home_ppg, away_ppg, pos_diff_norm,
+        # Derived (5)
+        ppg_diff, total_goals, goal_diff_avg, away_goal_diff_avg, cs_rate,
         # Rest (2)
         home_days_rest, away_days_rest,
-        # xG (2)
-        home_xg, away_xg,
-        # ELO (1) — home ELO minus away ELO, clamped ±600
+        # xG (4) — 0.0 during training, Understat values at inference
+        home_xg, away_xg, home_xg_against, away_xg_against,
+        # ELO (1)
         elo_diff,
         # Attack consistency + fixture load (3)
         home_scoring_std, away_scoring_std, fixture_cong,
@@ -265,26 +276,26 @@ def build_feature_vector(
 
 
 FEATURE_NAMES = [
-    # Form (6)
+    # Form (7)
     "home_form5", "home_form10", "away_form5", "away_form10",
-    "form_diff", "home_momentum",
+    "form_diff", "home_momentum", "away_momentum",
     # Goals (8)
     "home_gf_avg", "home_ga_avg", "away_gf_avg", "away_ga_avg",
     "home_gf_home", "home_ga_home", "away_gf_away", "away_ga_away",
     # H2H (3)
     "h2h_home_rate", "h2h_draw_rate", "h2h_away_rate",
     # Standing (5)
-    "home_position", "away_position", "home_ppg", "away_ppg", "pos_diff",
-    # Derived (4)
-    "ppg_diff", "total_goals_avg", "goal_diff_avg", "clean_sheet_rate",
+    "home_pos_norm", "away_pos_norm", "home_ppg", "away_ppg", "pos_diff_norm",
+    # Derived (5)
+    "ppg_diff", "total_goals_avg", "goal_diff_avg", "away_goal_diff_avg", "clean_sheet_rate",
     # Rest (2)
     "home_days_rest", "away_days_rest",
-    # xG (2)
-    "home_xg_for", "away_xg_for",
+    # xG (4)
+    "home_xg_for", "away_xg_for", "home_xg_against", "away_xg_against",
     # ELO (1)
     "elo_diff",
     # Attack consistency + fixture load (3)
     "home_scoring_std", "away_scoring_std", "fixture_congestion",
 ]
 
-N_FEATURES = len(FEATURE_NAMES)  # 34
+N_FEATURES = len(FEATURE_NAMES)  # 38
