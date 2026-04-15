@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { getTodayPredictions } from "../services/api";
 
-const N_SIMS = 10_000;
+const N_SIMS = 100_000;
 
 // ─── Simulation engine ────────────────────────────────────────────────────────
 
@@ -41,7 +41,7 @@ function runSimulation(lambdaHome, lambdaAway, N = N_SIMS) {
     const key = `${Math.min(h, 6)}-${Math.min(a, 6)}`;
     scoreMap[key] = (scoreMap[key] || 0) + 1;
 
-    if ((i + 1) % 200 === 0) {
+    if ((i + 1) % 1000 === 0) {
       convergence.push({ n: i + 1, pct: (homeWins / (i + 1)) * 100 });
     }
   }
@@ -181,7 +181,7 @@ function ScoreHeatmap({ scoreMap, N, homeLabel, awayLabel }) {
 function ConvergenceChart({ data, finalPct, homeLabel }) {
   if (!data?.length) return null;
   const W = 280, H = 64, PAD = 4;
-  const xs = data.map(d => ((d.n - 200) / (N_SIMS - 200)) * (W - PAD * 2) + PAD);
+  const xs = data.map(d => ((d.n - 1000) / (N_SIMS - 1000)) * (W - PAD * 2) + PAD);
   const minY = Math.min(...data.map(d => d.pct), finalPct) - 5;
   const maxY = Math.max(...data.map(d => d.pct), finalPct) + 5;
   const toY = pct => H - PAD - ((pct - minY) / (maxY - minY)) * (H - PAD * 2);
