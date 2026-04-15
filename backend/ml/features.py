@@ -1,7 +1,7 @@
 """
 Feature engineering for match outcome, over/under, and BTTS prediction.
 
-Feature vector (38 features):
+Feature vector (44 features):
   Form (7):        home_form5, home_form10, away_form5, away_form10, form_diff,
                    home_momentum, away_momentum
   Goals (8):       home_gf, home_ga, away_gf, away_ga, home_gf_home, home_ga_home,
@@ -12,16 +12,19 @@ Feature vector (38 features):
                    clean_sheet_rate
   Rest (2):        home_days_rest, away_days_rest
   xG (4):          home_xg_for, away_xg_for, home_xg_against, away_xg_against
+                   (training: SOT × 0.27 proxy; inference: Understat actual xG)
   ELO (1):         elo_diff (home minus away, clamped ±600)
   Attack (3):      home_scoring_std, away_scoring_std, fixture_congestion
+  Shots (4):       home_shots_avg, home_sot_avg, away_shots_avg, away_sot_avg
+                   (from FDCO CSVs during training; 0.0 at inference)
+  Context (2):     season_stage, away_clean_sheet_rate
 
 NOTE: Bookmaker odds are intentionally excluded from features. Including them
 causes the model to replicate market consensus instead of finding independent
 edge — which is counterproductive for value betting.
 
-NOTE: xG features (home_xg_for etc.) are populated at inference time via
-Understat but are 0.0 in training data. XGBoost does not split on constant
-features, so they contribute only when live data is available.
+NOTE: xG features are populated with SOT×0.27 proxy in training (FDCO CSVs
+have shots data), and real Understat xG at inference when available.
 
 form5/form10 are exponentially weighted (recent matches count more).
 Positions are normalised to [0,1] by total teams in the league (default 20).
@@ -137,6 +140,44 @@ def _days_since_last_match(matches: list[dict], ref_date: Optional[str]) -> floa
         return 7.0
 
 
+def _shots_sot_avg(matches: list[dict], team_id: int, n: int = 10) -> tuple[float, float]:
+    """Rolling average shots and shots-on-target over last n finished matches."""
+    recent = [m for m in matches if m.get("status") == "FINISHED"][-n:]
+    shots_list, sot_list = [], []
+    for m in recent:
+        home_id = m.get("homeTeam", {}).get("id")
+        shots = m.get("shots")
+        if not shots:
+            continue
+        if team_id == home_id:
+            shots_list.append(shots.get("home") or 0)
+            sot_list.append(shots.get("homeSot") or 0)
+        else:
+            shots_list.append(shots.get("away") or 0)
+            sot_list.append(shots.get("awaySot") or 0)
+    shots_avg = sum(shots_list) / len(shots_list) if shots_list else 0.0
+    sot_avg   = sum(sot_list)   / len(sot_list)   if sot_list   else 0.0
+    return shots_avg, sot_avg
+
+
+def _season_stage(match_date: Optional[str]) -> float:
+    """
+    Season progress normalised to [0, 1].
+    European football season: Aug (0.0) through May (1.0).
+    Returns 0.5 if date is unavailable or month is off-season.
+    """
+    if not match_date:
+        return 0.5
+    try:
+        month = int(match_date[5:7])
+        season_months = [8, 9, 10, 11, 12, 1, 2, 3, 4, 5]
+        if month in season_months:
+            return season_months.index(month) / (len(season_months) - 1)
+        return 0.5
+    except Exception:
+        return 0.5
+
+
 def _scoring_std(matches: list[dict], team_id: int, n: int = 10) -> float:
     """Standard deviation of goals scored in last N matches. High = inconsistent scorer."""
     recent = [m for m in matches if m.get("status") == "FINISHED"][-n:]
@@ -198,9 +239,14 @@ def build_feature_vector(
     # Total teams in the league — used to normalise standing position to [0,1].
     # Typical values: PL/PD/SA/FL1=20, BL1/DED=18, ELC=24. Default 20.
     total_teams: int = 20,
+    # Shots features — from FDCO CSVs during training, 0.0 at inference
+    home_shots_avg: float = 0.0,
+    home_sot_avg: float = 0.0,
+    away_shots_avg: float = 0.0,
+    away_sot_avg: float = 0.0,
 ) -> np.ndarray:
     """
-    Returns a 1-D float32 numpy feature vector (38 features).
+    Returns a 1-D float32 numpy feature vector (44 features).
     Feature order MUST stay consistent with training — do not reorder.
     """
     # --- Form (exponentially weighted) ---
@@ -221,6 +267,7 @@ def build_feature_vector(
     away_away_matches = [m for m in away_matches if m.get("awayTeam", {}).get("id") == away_id]
     home_gf_h, home_ga_h = _goals_for_against(home_home_matches, home_id)
     away_gf_a, away_ga_a = _goals_for_against(away_away_matches, away_id)
+    away_cs_rate = _clean_sheet_rate(away_away_matches, away_id)
 
     # --- H2H ---
     h2h_h, h2h_d, h2h_a = _h2h_stats(h2h_matches, home_id, away_id)
@@ -252,6 +299,9 @@ def build_feature_vector(
     away_scoring_std = _scoring_std(away_matches, away_id)
     fixture_cong     = _fixture_congestion(home_matches, away_matches, match_date)
 
+    # --- Season stage & context ---
+    s_stage = _season_stage(match_date)
+
     return np.array([
         # Form (7)
         hf5, hf10, af5, af10, form_diff, home_momentum, away_momentum,
@@ -266,12 +316,16 @@ def build_feature_vector(
         ppg_diff, total_goals, goal_diff_avg, away_goal_diff_avg, cs_rate,
         # Rest (2)
         home_days_rest, away_days_rest,
-        # xG (4) — 0.0 during training, Understat values at inference
+        # xG (4) — SOT×0.27 proxy in training, Understat values at inference
         home_xg, away_xg, home_xg_against, away_xg_against,
         # ELO (1)
         elo_diff,
         # Attack consistency + fixture load (3)
         home_scoring_std, away_scoring_std, fixture_cong,
+        # Shots (4) — from FDCO CSVs in training, 0.0 at inference
+        home_shots_avg, home_sot_avg, away_shots_avg, away_sot_avg,
+        # Context (2)
+        s_stage, away_cs_rate,
     ], dtype=np.float32)
 
 
@@ -296,6 +350,10 @@ FEATURE_NAMES = [
     "elo_diff",
     # Attack consistency + fixture load (3)
     "home_scoring_std", "away_scoring_std", "fixture_congestion",
+    # Shots (4)
+    "home_shots_avg", "home_sot_avg", "away_shots_avg", "away_sot_avg",
+    # Context (2)
+    "season_stage", "away_clean_sheet_rate",
 ]
 
-N_FEATURES = len(FEATURE_NAMES)  # 38
+N_FEATURES = len(FEATURE_NAMES)  # 44

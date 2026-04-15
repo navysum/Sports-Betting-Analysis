@@ -13,12 +13,24 @@ Computes:
   - Value bet flags (where model prob > implied bookmaker prob)
   - Dixon-Coles expected goals and correct-score distribution
 """
+import json
 import os
 import numpy as np
 import joblib
 from typing import Optional
 
 ML_DIR = os.path.dirname(__file__)
+_BLEND_WEIGHTS_PATH = os.path.join(ML_DIR, "..", "data", "blend_weights.json")
+_DEFAULT_BLEND = {"result": 0.50, "over25": 0.50, "btts": 0.50, "over35": 0.50}
+
+
+def _load_blend_weights() -> dict:
+    try:
+        with open(_BLEND_WEIGHTS_PATH, encoding="utf-8") as f:
+            w = json.load(f)
+        return {k: float(w.get(k, _DEFAULT_BLEND[k])) for k in _DEFAULT_BLEND}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return dict(_DEFAULT_BLEND)
 
 RESULT_MODEL_PATH  = os.path.join(ML_DIR, "result_model.joblib")
 GOALS_MODEL_PATH   = os.path.join(ML_DIR, "goals_model.joblib")
@@ -195,20 +207,22 @@ def predict(
     xg_home = xg_away = None
 
     if _dc_model and home_team and away_team:
-        from ml.dixon_coles import DC_BLEND_WEIGHT
         dc_info = _dc_model.match_probs(home_team, away_team)
         if dc_info:
-            w_dc  = DC_BLEND_WEIGHT
-            w_xgb = 1.0 - DC_BLEND_WEIGHT
+            bw = _load_blend_weights()
 
-            home_p    = w_xgb * home_p    + w_dc * dc_info["home"]
-            draw_p    = w_xgb * draw_p    + w_dc * dc_info["draw"]
-            away_p    = w_xgb * away_p    + w_dc * dc_info["away"]
-            over25_prob = w_xgb * over25_prob + w_dc * dc_info["over25"]
-            btts_prob   = w_xgb * btts_prob   + w_dc * dc_info["btts"]
-            # DC over35 from score grid
+            w_res  = bw["result"];  w_xgb_res  = 1.0 - w_res
+            w_ou   = bw["over25"];  w_xgb_ou   = 1.0 - w_ou
+            w_bt   = bw["btts"];    w_xgb_bt   = 1.0 - w_bt
+            w_o35  = bw["over35"];  w_xgb_o35  = 1.0 - w_o35
+
+            home_p    = w_xgb_res * home_p  + w_res * dc_info["home"]
+            draw_p    = w_xgb_res * draw_p  + w_res * dc_info["draw"]
+            away_p    = w_xgb_res * away_p  + w_res * dc_info["away"]
+            over25_prob = w_xgb_ou * over25_prob + w_ou * dc_info["over25"]
+            btts_prob   = w_xgb_bt * btts_prob   + w_bt * dc_info["btts"]
             if "over35" in dc_info:
-                over35_prob = w_xgb * over35_prob + w_dc * dc_info["over35"]
+                over35_prob = w_xgb_o35 * over35_prob + w_o35 * dc_info["over35"]
 
             # Renormalise result probs to sum to 1
             total = home_p + draw_p + away_p
