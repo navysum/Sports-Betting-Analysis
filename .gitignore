@@ -35,3 +35,10 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Logs
+*.log
+training.log
+
+# Accidentally included local paths
+OneDrive/

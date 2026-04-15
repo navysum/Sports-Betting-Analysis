@@ -11,11 +11,6 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite+aiosqlite:///./data/soccerbet.db"
 
-    # Telegram
-    telegram_token: str = ""
-    telegram_chat_id: str = "-5002959525"   # Jarvis HQ group
-    telegram_user_id: str = "5757363641"    # Your personal ID (admin commands)
-
     # Filesystem paths (relative to backend/)
     data_dir: str = "./data"
     models_dir: str = "./ml"
