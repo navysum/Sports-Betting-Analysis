@@ -261,13 +261,17 @@ def _train_and_calibrate(
     # SHAP on calibration holdout
     shap_top10 = _log_shap(final_model, X_cal, label)
 
-    # Isotonic calibration on temporal holdout
-    calibrator = CalibratedClassifierCV(final_model, method="isotonic", cv="prefit")
-    calibrator.fit(X_cal, y_cal)
-    joblib.dump(calibrator, cal_path)
+    # Isotonic calibration on temporal holdout (skipped for per-league models)
+    if cal_path is not None:
+        calibrator = CalibratedClassifierCV(final_model, method="isotonic", cv="prefit")
+        calibrator.fit(X_cal, y_cal)
+        joblib.dump(calibrator, cal_path)
+        cal_probs = calibrator.predict_proba(X_cal)
+    else:
+        # No calibrator — use raw model probs for metrics
+        cal_probs = final_model.predict_proba(X_cal)
 
     # Quality metrics
-    cal_probs = calibrator.predict_proba(X_cal)
     if n_classes > 2:
         ll = log_loss(y_cal, cal_probs)
         from sklearn.preprocessing import label_binarize
@@ -482,6 +486,76 @@ def train_all(X, y_result, y_goals, y_btts, y_over35,
     return entry
 
 
+# ─── Per-league model training ────────────────────────────────────────────────
+
+MIN_LEAGUE_SAMPLES = 300  # minimum samples needed to train a reliable per-league model
+
+
+def train_per_league(
+    X: np.ndarray,
+    y_result: np.ndarray,
+    y_goals: np.ndarray,
+    y_btts: np.ndarray,
+    y_over35: np.ndarray,
+    odds_rows: list,
+    hparams: dict = None,
+) -> dict:
+    """
+    Train competition-specific models for leagues that have enough samples.
+
+    Uses odds_rows (from FDCO) which carries feature_idx → league mapping.
+    Saves models as result_model_{code}.joblib etc. alongside the combined model.
+
+    Per-league models capture league-specific patterns:
+      - PL: high-tempo, fewer draws
+      - FL1: high-draw rate
+      - BL1: high-scoring games
+      - ELC: stamina/volume game, many matches
+    """
+    hparams = hparams or {}
+
+    # Build league → [feature indices] mapping from odds_rows
+    league_indices: dict[str, list[int]] = {}
+    for row in odds_rows:
+        code = row.get("league")
+        idx  = row.get("feature_idx")
+        if code and idx is not None and idx < len(X):
+            league_indices.setdefault(code, []).append(idx)
+
+    results = {}
+    for code, indices in league_indices.items():
+        n = len(indices)
+        if n < MIN_LEAGUE_SAMPLES:
+            print(f"  [{code}] {n} samples — skipping (need ≥{MIN_LEAGUE_SAMPLES})")
+            continue
+
+        print(f"\n[per-league] Training {code} ({n} samples)…")
+        idx_arr = np.array(indices)
+        Xl = X[idx_arr]
+        yrl = y_result[idx_arr]
+        ygl = y_goals[idx_arr]
+        ybl = y_btts[idx_arr]
+        yol = y_over35[idx_arr]
+
+        suffix = f"_{code}"
+        league_result_path = RESULT_MODEL_PATH.replace(".joblib", f"{suffix}.joblib")
+        league_goals_path  = GOALS_MODEL_PATH.replace(".joblib",  f"{suffix}.joblib")
+        league_btts_path   = BTTS_MODEL_PATH.replace(".joblib",   f"{suffix}.joblib")
+        league_over35_path = OVER35_MODEL_PATH.replace(".joblib",  f"{suffix}.joblib")
+
+        # We don't save per-league calibrators — use the combined calibrators at inference
+        # (calibration needs diversity across leagues to generalise well)
+        r = _train_and_calibrate(Xl, yrl, f"Result-{code}", 3, league_result_path, None, hparams)
+        g = _train_and_calibrate(Xl, ygl, f"Goals-{code}",  2, league_goals_path,  None, hparams)
+        b = _train_and_calibrate(Xl, ybl, f"BTTS-{code}",   2, league_btts_path,   None, hparams)
+        o = _train_and_calibrate(Xl, yol, f"Over35-{code}", 2, league_over35_path, None, hparams)
+
+        results[code] = {"samples": n, "result": r, "goals": g, "btts": b, "over35": o}
+        print(f"  [{code}] Models saved.")
+
+    return results
+
+
 # ─── Log helpers ─────────────────────────────────────────────────────────────
 
 def _load_training_log() -> list:
@@ -546,9 +620,17 @@ async def main():
         print(f"\nRunning Optuna search on result model ({n_trials} trials)…")
         hparams = _optuna_search(X, y_result, n_classes=3, n_trials=n_trials)
 
-    # 6. Train all models
+    # 6. Train combined model (all leagues together)
     train_all(X, y_result, y_goals, y_btts, y_over35,
               odds_rows=odds_rows_fdco, hparams=hparams)
+
+    # 7. Train per-league models (uses FDCO data which has competition labels)
+    #    These are used automatically at inference when a league-specific model exists.
+    print("\n=== Per-league model training ===")
+    train_per_league(
+        X_fdco, yr_fdco, yg_fdco, yb_fdco, yo_fdco,
+        odds_rows=odds_rows_fdco, hparams=hparams,
+    )
 
 
 if __name__ == "__main__":

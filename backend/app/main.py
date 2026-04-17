@@ -3,20 +3,38 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 from app.database import init_db
 from app.api.matches import router as matches_router
 from app.api.predictions import router as predictions_router, preload_today_predictions
 from app.api.admin import router as admin_router
 from ml.predict import load_model
 
+_scheduler = AsyncIOScheduler(timezone="UTC")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     load_model()
-    # Kick off today's predictions in the background so they're ready when users arrive
+
+    # Kick off today's predictions immediately so they're ready when users arrive
     asyncio.create_task(preload_today_predictions())
+
+    # Schedule daily 6am UTC preload — predictions are warm before anyone opens the site
+    _scheduler.add_job(
+        preload_today_predictions,
+        CronTrigger(hour=6, minute=0, timezone="UTC"),
+        id="daily_preload",
+        replace_existing=True,
+    )
+    _scheduler.start()
+
     yield
+
+    _scheduler.shutdown(wait=False)
 
 
 app = FastAPI(
