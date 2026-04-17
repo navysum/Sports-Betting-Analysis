@@ -33,6 +33,17 @@ from ml.elo import load_elo_ratings, EloSystem
 
 _elo: EloSystem = load_elo_ratings()
 
+# FIX #3 — xG scale mismatch between training and inference.
+# During training (FDCO CSVs), xG features are computed as: sot_rolling_avg × 0.27
+# Typical sot_avg ≈ 4.0 shots/game → training xG ≈ 1.08 per team.
+# At inference, Understat real xG is used — typical top-league team ≈ 1.30–1.50/game,
+# which is 20–40% higher than the training distribution. Without rescaling, the
+# model sees out-of-distribution xG values and mispredicts attacking-team matchups.
+#
+# Scale factor: (mean training proxy) / (mean real xG) ≈ 1.08 / 1.35 ≈ 0.80
+# This maps real Understat xG back into the range the model was trained on.
+_XG_INFERENCE_SCALE: float = 0.80
+
 
 async def _safe(coro, default=None):
     try:
@@ -138,11 +149,13 @@ async def predict_match(
     if api_match_id:
         h2h_matches = await _safe(get_h2h(api_match_id), [])
 
-    # xG enrichment (Understat)
-    home_xg         = (home_xg_data or {}).get("last5_xg_for",     0.0)
-    away_xg         = (away_xg_data or {}).get("last5_xg_for",     0.0)
-    home_xg_against = (home_xg_data or {}).get("last5_xg_against", 0.0)
-    away_xg_against = (away_xg_data or {}).get("last5_xg_against", 0.0)
+    # xG enrichment (Understat) — scaled to match training distribution.
+    # Raw Understat values are multiplied by _XG_INFERENCE_SCALE (0.80) to bring
+    # them into the same range as the SOT×0.27 proxy used during training.
+    home_xg         = (home_xg_data or {}).get("last5_xg_for",     0.0) * _XG_INFERENCE_SCALE
+    away_xg         = (away_xg_data or {}).get("last5_xg_for",     0.0) * _XG_INFERENCE_SCALE
+    home_xg_against = (home_xg_data or {}).get("last5_xg_against", 0.0) * _XG_INFERENCE_SCALE
+    away_xg_against = (away_xg_data or {}).get("last5_xg_against", 0.0) * _XG_INFERENCE_SCALE
 
     standing_map = {row["team"]["id"]: row for row in (standings_table or [])}
 
@@ -212,21 +225,15 @@ async def predict_match(
             f"{away_team_name}: {len(away_injuries)} injury/suspension(s) ({away_inj_adj:+.0%})"
         )
 
-    # xPts regression adjustment (FBref) — teams over/underperforming their xPts
-    home_xpts_adj = _xpts_adjustment(home_fbref or {})
-    away_xpts_adj = _xpts_adjustment(away_fbref or {})
-    if abs(home_xpts_adj) > 0.005:
-        home_adj += home_xpts_adj
-        pts_over = (home_fbref or {}).get("pts_over_xpts", 0.0)
-        adjustments_applied.append(
-            f"{home_team_name}: xPts regression ({pts_over:+.2f} pts/game vs xPts → {home_xpts_adj:+.0%})"
-        )
-    if abs(away_xpts_adj) > 0.005:
-        away_adj += away_xpts_adj
-        pts_over = (away_fbref or {}).get("pts_over_xpts", 0.0)
-        adjustments_applied.append(
-            f"{away_team_name}: xPts regression ({pts_over:+.2f} pts/game vs xPts → {away_xpts_adj:+.0%})"
-        )
+    # FIX #4: xPts regression adjustment DISABLED — untested heuristic removed.
+    # The −xpts_diff × 0.008 adjustment assumed all teams overperforming xPts are
+    # "lucky" and due for regression. In practice, teams often outperform xPts for
+    # structural reasons (elite finisher, defensive system, set-piece threat) and
+    # the adjustment was just as likely to hurt as help. An independent backtest
+    # on a temporal holdout is required before re-enabling. Until that validation
+    # exists, applying it risks introducing systematic misdirection on ~30-40% of
+    # matches. FBref data is still fetched (used for display on the frontend)
+    # but the probability adjustment is suppressed.
 
     # Apply adjustments if any
     if home_adj != 0.0 or away_adj != 0.0:
@@ -253,10 +260,13 @@ async def predict_match(
     # ── CLV logging ───────────────────────────────────────────────────────────
     if home_team_name and away_team_name:
         match_id = _make_match_id(competition_code, date_str, home_team_name, away_team_name)
+        # FIX #5: log over25 CLV now that Pinnacle totals odds are available.
+        # btts / over35 remain logged without implied_prob (no Pinnacle line available).
         for market, prob_key in [
-            ("home",  "home_win_prob"),
-            ("draw",  "draw_prob"),
-            ("away",  "away_win_prob"),
+            ("home",   "home_win_prob"),
+            ("draw",   "draw_prob"),
+            ("away",   "away_win_prob"),
+            ("over25", "over25_prob"),
         ]:
             try:
                 log_prediction(
