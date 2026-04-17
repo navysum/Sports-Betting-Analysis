@@ -177,7 +177,7 @@ class _RunningTable:
 
 def build_fdco_training_data(
     min_history: int = 5,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict], np.ndarray]:
     """
     Load all cached FDCO CSVs and build feature vectors.
 
@@ -188,9 +188,11 @@ def build_fdco_training_data(
         y_btts    — int array  0=No, 1=Yes
         y_over35  — int array  0=Under3.5, 1=Over3.5
         odds_rows — list of dicts for backtesting  {date, home, away, b365h, b365d, b365a, ...}
+        dates     — ISO date strings (YYYY-MM-DD) for each row — used for temporal CV sorting
     """
     csv_dir = settings.csv_dir
     X_all, y_result_all, y_goals_all, y_btts_all, y_over35_all = [], [], [], [], []
+    dates_all: list[str] = []
     odds_rows = []
     total_files = 0
 
@@ -257,8 +259,11 @@ def build_fdco_training_data(
                 # Pre-match ELO difference (computed BEFORE updating ELO)
                 elo_diff = elo.get_diff(home_name, away_name)
 
-                # Rolling shots/SOT averages — used both as shot features and
-                # as SOT×0.27 xG proxy (fixes the 0.0 xG training gap)
+                # Rolling shots/SOT averages — used for the SOT×0.27 xG proxy only.
+                # Shots features themselves are intentionally zeroed in training so
+                # they match the 0.0 values seen at inference (no live shots API).
+                # Leaving them non-zero during training caused a feature distribution
+                # mismatch (training ≠ inference), silently degrading predictions.
                 home_shots, home_sot = _shots_sot_avg(home_hist[-25:], home_id)
                 away_shots, away_sot = _shots_sot_avg(away_hist[-25:], away_id)
                 _SOT_XG = 0.27  # empirical shots-on-target to xG conversion
@@ -282,11 +287,12 @@ def build_fdco_training_data(
                     away_xg=away_sot * _SOT_XG,
                     home_xg_against=away_sot * _SOT_XG,
                     away_xg_against=home_sot * _SOT_XG,
-                    # Shots features
-                    home_shots_avg=home_shots,
-                    home_sot_avg=home_sot,
-                    away_shots_avg=away_shots,
-                    away_sot_avg=away_sot,
+                    # Shots features zeroed — match inference behaviour (no live shots API).
+                    # XGBoost will assign zero importance to zero-variance features.
+                    home_shots_avg=0.0,
+                    home_sot_avg=0.0,
+                    away_shots_avg=0.0,
+                    away_sot_avg=0.0,
                 )
 
                 X_all.append(vec)
@@ -294,6 +300,7 @@ def build_fdco_training_data(
                 y_goals_all.append(goals_label)
                 y_btts_all.append(btts_label)
                 y_over35_all.append(over35_label)
+                dates_all.append(date_str)
 
                 # Record odds for backtesting + DC model building
                 odds_rows.append({
@@ -323,7 +330,7 @@ def build_fdco_training_data(
         return (
             np.empty((0, N_FEATURES), dtype=np.float32),
             np.array([]), np.array([]), np.array([]), np.array([]),
-            [],
+            [], np.array([], dtype="U10"),
         )
 
     # Persist merged ELO ratings (most recent per-league ratings saved globally)
@@ -344,6 +351,7 @@ def build_fdco_training_data(
         np.array(y_btts_all),
         np.array(y_over35_all),
         odds_rows,
+        np.array(dates_all, dtype="U10"),  # YYYY-MM-DD strings for temporal sorting
     )
 
 

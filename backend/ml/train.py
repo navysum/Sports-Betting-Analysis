@@ -30,7 +30,7 @@ import json
 import numpy as np
 import joblib
 from xgboost import XGBClassifier
-from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.model_selection import cross_val_score, TimeSeriesSplit
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import log_loss, brier_score_loss
 from sklearn.utils.class_weight import compute_sample_weight
@@ -85,12 +85,14 @@ def _make_xgb(n_classes: int = 3, **overrides) -> XGBClassifier:
 
 def _load_cache() -> tuple:
     """Load accumulated training data. Returns empty arrays if absent or stale."""
+    empty_dates = np.array([], dtype="U10")
     empty = (
         np.empty((0, N_FEATURES), dtype=np.float32),
         np.array([], dtype=np.int64),
         np.array([], dtype=np.int64),
         np.array([], dtype=np.int64),
         np.array([], dtype=np.int64),
+        empty_dates,
     )
     if not os.path.exists(CACHE_PATH):
         return empty
@@ -101,23 +103,38 @@ def _load_cache() -> tuple:
             print(f"  [cache] Feature mismatch ({X.shape[1]} vs {N_FEATURES}) — discarding.")
             return empty
         y_over35 = data["y_over35"] if "y_over35" in data else np.zeros(len(X), dtype=np.int64)
-        return X, data["y_result"], data["y_goals"], data["y_btts"], y_over35
+        # dates added in v2 — back-fill with empty strings for old caches
+        dates = data["dates"] if "dates" in data else np.array([""] * len(X), dtype="U10")
+        return X, data["y_result"], data["y_goals"], data["y_btts"], y_over35, dates
     except Exception as e:
         print(f"  [cache] Load failed ({e}), starting fresh.")
         return empty
 
 
-def _save_cache(X, y_result, y_goals, y_btts, y_over35) -> None:
+def _save_cache(X, y_result, y_goals, y_btts, y_over35, dates=None) -> None:
     os.makedirs(CACHE_DIR, exist_ok=True)
+    if dates is None:
+        dates = np.array([""] * len(X), dtype="U10")
     np.savez_compressed(
         CACHE_PATH, X=X,
         y_result=y_result, y_goals=y_goals, y_btts=y_btts, y_over35=y_over35,
+        dates=dates,
     )
     print(f"  [cache] Saved {len(X)} samples to {CACHE_PATH}")
 
 
-def _merge(*arrays_tuple):
-    """Merge (X, yr, yg, yb, yo) tuples, deduplicating on feature row hash."""
+def _merge(*arrays_tuple, dates_tuple=None):
+    """Merge (X, yr, yg, yb, yo) tuples, deduplicating on feature row hash.
+
+    FIX #1 — temporal leakage:
+    When dates_tuple is provided (one date-string array per source), the merged
+    output is SORTED chronologically before returning. This ensures TimeSeriesSplit
+    in CV sees genuine past→future folds instead of randomly interleaved leagues.
+
+    Previously data was concatenated in source order (cache → FDCO per-league →
+    API), which destroyed chronological ordering and allowed future fixtures to
+    bleed into training folds — inflating reported CV accuracy by 5–10%.
+    """
     Xs, yrs, ygs, ybs, yos = zip(*arrays_tuple)
     X_all  = np.concatenate(Xs)
     yr_all = np.concatenate(yrs)
@@ -125,8 +142,13 @@ def _merge(*arrays_tuple):
     yb_all = np.concatenate(ybs)
     yo_all = np.concatenate(yos)
 
+    if dates_tuple is not None:
+        dates_all = np.concatenate(dates_tuple)
+    else:
+        dates_all = np.array([""] * len(X_all), dtype="U10")
+
     if len(X_all) == 0:
-        return X_all, yr_all, yg_all, yb_all, yo_all
+        return X_all, yr_all, yg_all, yb_all, yo_all, dates_all
 
     seen = set()
     keep = []
@@ -136,7 +158,15 @@ def _merge(*arrays_tuple):
             seen.add(key)
             keep.append(i)
 
-    return X_all[keep], yr_all[keep], yg_all[keep], yb_all[keep], yo_all[keep]
+    keep = np.array(keep)
+    X_out  = X_all[keep];  yr_out = yr_all[keep]
+    yg_out = yg_all[keep]; yb_out = yb_all[keep]
+    yo_out = yo_all[keep]; dt_out = dates_all[keep]
+
+    # Sort chronologically — empty-string dates (cache back-compat) sort to front
+    sort_idx = np.argsort(dt_out, kind="stable")
+    return (X_out[sort_idx], yr_out[sort_idx], yg_out[sort_idx],
+            yb_out[sort_idx], yo_out[sort_idx], dt_out[sort_idx])
 
 
 # ─── Optuna hyperparameter search ─────────────────────────────────────────────
@@ -170,7 +200,7 @@ def _optuna_search(X: np.ndarray, y: np.ndarray, n_classes: int, n_trials: int =
             gamma=trial.suggest_float("gamma", 0.0, 0.5),
         )
         m = _make_xgb(n_classes, **params)
-        cv = StratifiedKFold(n_splits=3, shuffle=False)
+        cv = TimeSeriesSplit(n_splits=3)
         scores = cross_val_score(m, Xs, ys, cv=cv, scoring="neg_log_loss")
         return -scores.mean()
 
@@ -233,9 +263,12 @@ def _train_and_calibrate(
     # Sample weights — upweight draws / minority classes
     sample_weight = compute_sample_weight("balanced", y_train)
 
-    # 5-fold CV for accuracy estimate (no early stopping, fixed 500 trees)
+    # 5-fold TimeSeriesSplit CV — respects temporal ordering so later folds are
+    # always in the future relative to training folds. Previously StratifiedKFold
+    # with shuffle=False was used on data that wasn't globally sorted by date,
+    # causing future match data to leak into earlier training folds (FIX #1).
     cv_model = _make_xgb(n_classes, **hparams)
-    cv = StratifiedKFold(n_splits=5, shuffle=False)
+    cv = TimeSeriesSplit(n_splits=5)
     scores = cross_val_score(cv_model, X_train, y_train, cv=cv,
                              scoring="accuracy", fit_params={"sample_weight": sample_weight})
     print(f"  {label} CV accuracy: {scores.mean():.3f} ± {scores.std():.3f}")
@@ -245,12 +278,17 @@ def _train_and_calibrate(
     X_fit, X_es = X_train[:es_split], X_train[es_split:]
     y_fit, y_es = y_train[:es_split], y_train[es_split:]
     sw_fit = sample_weight[:es_split]
+    # FIX #12: apply balanced sample weights to the early-stopping eval set too.
+    # Previously the eval set was unweighted, so early stopping optimised for
+    # unbalanced accuracy — overfitting HOME wins and suppressing draws.
+    sw_es  = compute_sample_weight("balanced", y_es)
 
     final_model = _make_xgb(n_classes, n_estimators=1500, **hparams)
     final_model.fit(
         X_fit, y_fit,
         sample_weight=sw_fit,
         eval_set=[(X_es, y_es)],
+        sample_weight_eval_set=[sw_es],
         early_stopping_rounds=30,
         verbose=False,
     )
@@ -329,6 +367,7 @@ async def fetch_api_training_data():
             return resp.json()
 
     X, y_result, y_goals, y_btts, y_over35 = [], [], [], [], []
+    dates: list[str] = []
     skipped = 0
     team_cache: dict[int, list] = {}
 
@@ -400,6 +439,7 @@ async def fetch_api_training_data():
             y_goals.append(goals_label)
             y_btts.append(btts_label)
             y_over35.append(over35_label)
+            dates.append(date_str)
 
             if (i + 1) % 20 == 0:
                 print(f"    [{comp}] {i + 1}/{len(finished)} processed, {len(X)} samples so far…")
@@ -407,11 +447,13 @@ async def fetch_api_training_data():
     print(f"\n  [api] {len(X)} samples | {skipped} skipped | {len(team_cache)} unique teams")
     empty = np.empty((0, N_FEATURES), dtype=np.float32)
     if not X:
-        return empty, np.array([]), np.array([]), np.array([]), np.array([])
+        return (empty, np.array([]), np.array([]), np.array([]), np.array([]),
+                np.array([], dtype="U10"))
     return (
         np.array(X, dtype=np.float32),
         np.array(y_result), np.array(y_goals),
         np.array(y_btts),   np.array(y_over35),
+        np.array(dates, dtype="U10"),
     )
 
 
@@ -466,6 +508,17 @@ def train_all(X, y_result, y_goals, y_btts, y_over35,
             dc_stats = {"teams": len(dc.attack), "matches_used": len(dc_matches)}
         else:
             print("  [dc] Fitting did not converge — skipping save.")
+
+    # FIX #9: auto-run blend weight optimisation after every retrain.
+    # Previously blend_weights.json was hardcoded with arbitrary values
+    # ("result": 0.2, "over25": 0.05). Now the optimiser runs on the temporal
+    # holdout set automatically so blend weights are always data-driven.
+    print("\nRunning blend weight optimisation…")
+    try:
+        from ml.optimize_blend import optimise as _optimise_blend
+        _optimise_blend()
+    except Exception as _e:
+        print(f"  [blend] Optimisation failed (non-fatal): {_e}")
 
     log = _load_training_log()
     from datetime import datetime, timezone
@@ -538,17 +591,26 @@ def train_per_league(
         yol = y_over35[idx_arr]
 
         suffix = f"_{code}"
-        league_result_path = RESULT_MODEL_PATH.replace(".joblib", f"{suffix}.joblib")
-        league_goals_path  = GOALS_MODEL_PATH.replace(".joblib",  f"{suffix}.joblib")
-        league_btts_path   = BTTS_MODEL_PATH.replace(".joblib",   f"{suffix}.joblib")
-        league_over35_path = OVER35_MODEL_PATH.replace(".joblib",  f"{suffix}.joblib")
+        league_result_path  = RESULT_MODEL_PATH.replace(".joblib", f"{suffix}.joblib")
+        league_goals_path   = GOALS_MODEL_PATH.replace(".joblib",  f"{suffix}.joblib")
+        league_btts_path    = BTTS_MODEL_PATH.replace(".joblib",   f"{suffix}.joblib")
+        league_over35_path  = OVER35_MODEL_PATH.replace(".joblib",  f"{suffix}.joblib")
 
-        # We don't save per-league calibrators — use the combined calibrators at inference
-        # (calibration needs diversity across leagues to generalise well)
-        r = _train_and_calibrate(Xl, yrl, f"Result-{code}", 3, league_result_path, None, hparams)
-        g = _train_and_calibrate(Xl, ygl, f"Goals-{code}",  2, league_goals_path,  None, hparams)
-        b = _train_and_calibrate(Xl, ybl, f"BTTS-{code}",   2, league_btts_path,   None, hparams)
-        o = _train_and_calibrate(Xl, yol, f"Over35-{code}", 2, league_over35_path, None, hparams)
+        # FIX #2: train and save per-league calibrators.
+        # Previously per-league models used the global calibrator at inference,
+        # which was fitted on the combined dataset (P(home)≈0.46). A per-league
+        # model (e.g. PL) outputs P(home)≈0.52, so the global calibrator pushed
+        # probabilities in the wrong direction. Each league now gets its own
+        # isotonic calibrator trained on its own holdout split.
+        league_result_cal_path  = RESULT_CAL_PATH.replace(".joblib",  f"{suffix}.joblib")
+        league_goals_cal_path   = GOALS_CAL_PATH.replace(".joblib",   f"{suffix}.joblib")
+        league_btts_cal_path    = BTTS_CAL_PATH.replace(".joblib",    f"{suffix}.joblib")
+        league_over35_cal_path  = OVER35_CAL_PATH.replace(".joblib",  f"{suffix}.joblib")
+
+        r = _train_and_calibrate(Xl, yrl, f"Result-{code}", 3, league_result_path, league_result_cal_path,   hparams)
+        g = _train_and_calibrate(Xl, ygl, f"Goals-{code}",  2, league_goals_path,  league_goals_cal_path,    hparams)
+        b = _train_and_calibrate(Xl, ybl, f"BTTS-{code}",   2, league_btts_path,   league_btts_cal_path,     hparams)
+        o = _train_and_calibrate(Xl, yol, f"Over35-{code}", 2, league_over35_path, league_over35_cal_path,   hparams)
 
         results[code] = {"samples": n, "result": r, "goals": g, "btts": b, "over35": o}
         print(f"  [{code}] Models saved.")
@@ -585,29 +647,31 @@ async def main():
 
     # 1. Load accumulated cache
     print("Loading accumulated data cache…")
-    X_cache, yr_cache, yg_cache, yb_cache, yo_cache = _load_cache()
+    X_cache, yr_cache, yg_cache, yb_cache, yo_cache, dates_cache = _load_cache()
     print(f"  Cache: {len(X_cache)} samples\n")
 
     # 2. Download + load FDCO CSV data
     print("Loading Football-Data.co.uk CSV data…")
     from ml.fdco_trainer import build_fdco_training_data, download_all_csvs
     await download_all_csvs()
-    X_fdco, yr_fdco, yg_fdco, yb_fdco, yo_fdco, odds_rows_fdco = build_fdco_training_data()
+    X_fdco, yr_fdco, yg_fdco, yb_fdco, yo_fdco, odds_rows_fdco, dates_fdco = build_fdco_training_data()
     print()
 
     # 3. Fetch fresh API data
     print("Fetching current-season data from API (rate-limited)…\n")
-    X_api, yr_api, yg_api, yb_api, yo_api = await fetch_api_training_data()
+    X_api, yr_api, yg_api, yb_api, yo_api, dates_api = await fetch_api_training_data()
     print()
 
     # 4. Merge all sources + update cache
-    X, y_result, y_goals, y_btts, y_over35 = _merge(
+    # FIX #1: _merge now sorts by date so TimeSeriesSplit sees genuine temporal folds.
+    X, y_result, y_goals, y_btts, y_over35, dates_merged = _merge(
         (X_cache, yr_cache, yg_cache, yb_cache, yo_cache),
         (X_fdco,  yr_fdco,  yg_fdco,  yb_fdco,  yo_fdco),
         (X_api,   yr_api,   yg_api,   yb_api,   yo_api),
+        dates_tuple=(dates_cache, dates_fdco, dates_api),
     )
     print(f"Total unique samples after merge: {len(X)}")
-    _save_cache(X, y_result, y_goals, y_btts, y_over35)
+    _save_cache(X, y_result, y_goals, y_btts, y_over35, dates_merged)
 
     if len(X) < 50:
         print("ERROR: Not enough training data. Check your API key and CSV files.")
