@@ -292,7 +292,7 @@ class DixonColesModel:
             1.0 - grid[0, :].sum() - grid[:, 0].sum() + grid[0, 0]
         )
 
-        # Top 5 correct-score probabilities
+        # Top 12 correct-score probabilities (for display)
         flat = [
             (float(grid[i, j]), i, j)
             for i in range(grid.shape[0])
@@ -300,8 +300,16 @@ class DixonColesModel:
         ]
         flat.sort(reverse=True)
         correct_scores = [
-            {"score": f"{i}-{j}", "prob": round(p, 3)}
-            for p, i, j in flat[:5]
+            {"score": f"{i}-{j}", "prob": round(p, 4)}
+            for p, i, j in flat[:12]
+        ]
+
+        # Full score grid as nested list — used by frontend Monte Carlo to
+        # sample directly from the τ-corrected distribution (far more accurate
+        # than raw Poisson sampling, especially for low-scoring scorelines).
+        score_grid = [
+            [round(float(grid[i, j]), 6) for j in range(grid.shape[1])]
+            for i in range(grid.shape[0])
         ]
 
         lam, mu = self._lambdas(home_team, away_team)
@@ -314,8 +322,11 @@ class DixonColesModel:
             "over35":         round(max(min(over35, 1.0), 0.0), 4),
             "btts":           round(max(min(btts,   1.0), 0.0), 4),
             "xg_home":        round(lam, 2),
-            "xg_away":        round(mu, 2),
+            "xg_away":        round(mu,  2),
+            "rho":            round(self.rho, 4),
             "correct_scores": correct_scores,
+            "score_grid":     score_grid,
+            "score_grid_size": grid.shape[0],
         }
 
     # ── Persistence ───────────────────────────────────────────────────────────
