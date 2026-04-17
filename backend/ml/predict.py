@@ -230,6 +230,7 @@ def predict(
     dc_info = None
     correct_scores: list = []
     xg_home = xg_away = None
+    score_grid = score_grid_size = dc_rho = None
 
     if _dc_model and home_team and away_team:
         dc_info = _dc_model.match_probs(home_team, away_team)
@@ -257,6 +258,9 @@ def predict(
             correct_scores = dc_info.get("correct_scores", [])
             xg_home = dc_info.get("xg_home")
             xg_away = dc_info.get("xg_away")
+            score_grid      = dc_info.get("score_grid")
+            score_grid_size = dc_info.get("score_grid_size", 9)
+            dc_rho          = dc_info.get("rho")
 
     # ── Value bets (with Kelly sizing) ───────────────────────────────────────
     value_bets = []
@@ -320,8 +324,12 @@ def predict(
         "calibrated":        _result_cal is not None,
         "dc_available":      dc_info is not None,
         "correct_scores":    correct_scores,
+        "score_grid":        score_grid,
+        "score_grid_size":   score_grid_size,
+        "dc_rho":            dc_rho,
         "xg_home":           xg_home,
         "xg_away":           xg_away,
+        "bookmaker_odds":    dict(odds) if odds else None,
         "league_model_used": bool(league_code and os.path.exists(
             RESULT_MODEL_PATH.replace(".joblib", f"_{league_code}.joblib")
         )),
