@@ -68,11 +68,16 @@ def _goals_for_against(matches: list[dict], team_id: int) -> tuple[float, float]
 
 
 def _form_points(matches: list[dict], team_id: int, n: int = 5) -> float:
-    """Exponentially weighted form — recent matches count more (decay=0.85)."""
+    """Exponentially weighted form — recent matches count more.
+
+    Decay = 0.80 (previously 0.85): weights the 5th-most-recent match at
+    ~41% of the most recent, vs 52% at 0.85. More sensitive to recent form
+    change; reduces season-crossover contamination.
+    """
     recent = [m for m in matches if m.get("status") == "FINISHED"][-n:]
     if not recent:
         return 0.0
-    decay = 0.85
+    decay = 0.80
     total_weight = 0.0
     weighted_pts = 0.0
     for i, m in enumerate(recent):
@@ -108,6 +113,13 @@ def _clean_sheet_rate(matches: list[dict], team_id: int, n: int = 10) -> float:
 
 
 def _h2h_stats(h2h_matches: list[dict], home_id: int, away_id: int) -> tuple[float, float, float]:
+    """Return H2H win rates for (home, draw, away).
+
+    Returns a neutral prior of (1/3, 1/3, 1/3) when no H2H data is available.
+    Previously returned (0, 0, 0) which was indistinguishable from a perfectly
+    balanced history and caused silent bias on first-time matchups or newly
+    promoted clubs.
+    """
     results = []
     for m in h2h_matches[-10:]:
         h = m.get("homeTeam", {}).get("id")
@@ -119,7 +131,10 @@ def _h2h_stats(h2h_matches: list[dict], home_id: int, away_id: int) -> tuple[flo
             results.append("H" if hg > ag else ("D" if hg == ag else "A"))
         elif h == away_id:
             results.append("A" if hg > ag else ("D" if hg == ag else "H"))
-    n = max(len(results), 1)
+    if not results:
+        # Neutral prior — no H2H data available (new fixture / promoted club)
+        return 1 / 3, 1 / 3, 1 / 3
+    n = len(results)
     return results.count("H") / n, results.count("D") / n, results.count("A") / n
 
 
