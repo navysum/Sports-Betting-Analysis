@@ -1,11 +1,13 @@
-import asyncio
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
+import asyncio  # Async I/O support for concurrent tasks
+from fastapi import FastAPI  # Core FastAPI framework for building APIs
+from fastapi.middleware.cors import CORSMiddleware  # Handles CORS (cross-origin requests)
+from contextlib import asynccontextmanager  # Manages app lifecycle (startup/shutdown)
 
+# Scheduler imports
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+# Local application imports
 from app.database import init_db
 from app.api.matches import router as matches_router
 from app.api.predictions import router as predictions_router, preload_today_predictions
