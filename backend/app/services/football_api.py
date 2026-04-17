@@ -71,9 +71,10 @@ async def get_upcoming_matches(competition_code: str = "PL", days_ahead: int = 7
 
 async def get_today_matches(competition_code: str = "PL") -> list[dict]:
     today = datetime.utcnow().strftime("%Y-%m-%d")
+    # football-data.org uses TIMED for confirmed fixtures and SCHEDULED for date-only ones
     data = await _get(
         f"{BASE_URL}/competitions/{competition_code}/matches",
-        {"status": "SCHEDULED", "dateFrom": today, "dateTo": today},
+        {"status": "SCHEDULED,TIMED", "dateFrom": today, "dateTo": today},
     )
     return data.get("matches", [])
 
@@ -82,7 +83,7 @@ async def get_tomorrow_matches(competition_code: str = "PL") -> list[dict]:
     tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
     data = await _get(
         f"{BASE_URL}/competitions/{competition_code}/matches",
-        {"status": "SCHEDULED", "dateFrom": tomorrow, "dateTo": tomorrow},
+        {"status": "SCHEDULED,TIMED", "dateFrom": tomorrow, "dateTo": tomorrow},
     )
     return data.get("matches", [])
 
@@ -173,13 +174,14 @@ async def get_all_today_matches() -> list[dict]:
     for code in FDORG_COMPETITIONS:
         try:
             matches = await get_today_matches(code)
+            print(f"[football_api] {code}: {len(matches)} match(es) today")
             for m in matches:
                 m["_competition_code"] = code
                 m["_competition_name"] = SUPPORTED_COMPETITIONS.get(code, code)
             results.extend(matches)
             await asyncio.sleep(6)  # stay within 10 req/min
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[football_api] {code}: failed — {e}")
     return results
 
 
