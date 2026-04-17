@@ -63,6 +63,87 @@ def _save_odds_cache(cache: dict):
         json.dump(cache, f)
 
 
+async def get_pinnacle_odds(competition_code: str) -> list[dict]:
+    """
+    Fetch Pinnacle-only odds — the sharp market reference for CLV calculation.
+
+    Pinnacle is the gold-standard sharp book: their closing line is the most
+    efficient price in the market. Comparing model probability to Pinnacle's
+    implied probability is the real edge measure.
+
+    Returns same structure as get_odds_for_competition() but Pinnacle only.
+    Cached separately (same 6h TTL but keyed differently).
+    """
+    global _requests_remaining
+
+    if not settings.odds_api_key:
+        return []
+
+    sport = SPORT_MAP.get(competition_code)
+    if not sport:
+        return []
+
+    cache = _load_odds_cache()
+    cache_key = f"{competition_code}_pinnacle"
+    cached = cache.get(cache_key)
+    if cached and time.time() - cached.get("ts", 0) < CACHE_TTL:
+        return cached["data"]
+
+    params = {
+        "apiKey":     settings.odds_api_key,
+        "regions":    "eu",
+        "markets":    "h2h",
+        "oddsFormat": "decimal",
+        "bookmakers": "pinnacle",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(f"{BASE_URL}/sports/{sport}/odds", params=params)
+            resp.raise_for_status()
+            _requests_remaining = int(resp.headers.get("x-requests-remaining", -1))
+            events = resp.json()
+    except Exception as e:
+        print(f"[odds_api] Pinnacle {competition_code} fetch failed: {e}")
+        return []
+
+    results = []
+    for event in events:
+        home = event.get("home_team", "")
+        away = event.get("away_team", "")
+        commence = event.get("commence_time", "")
+        odds = _extract_best_odds(event.get("bookmakers", []), home, away)
+        if odds:
+            results.append({
+                "home_team": home,
+                "away_team": away,
+                "commence_time": commence,
+                "odds": odds,
+            })
+
+    cache[cache_key] = {"data": results, "ts": time.time()}
+    _save_odds_cache(cache)
+    return results
+
+
+async def find_pinnacle_odds(
+    home_team: str,
+    away_team: str,
+    competition_code: str,
+) -> Optional[dict]:
+    """Return Pinnacle odds for a specific match, or None."""
+    events = await get_pinnacle_odds(competition_code)
+    if not events:
+        return None
+    home_lower = home_team.lower()
+    away_lower = away_team.lower()
+    for event in events:
+        if _fuzzy_match(home_lower, event["home_team"].lower()) and \
+           _fuzzy_match(away_lower, event["away_team"].lower()):
+            return event["odds"]
+    return None
+
+
 async def get_odds_for_competition(competition_code: str, region: str = "uk") -> list[dict]:
     """
     Fetch odds for all upcoming matches in a competition.

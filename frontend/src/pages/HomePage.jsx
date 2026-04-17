@@ -166,6 +166,59 @@ function MatchRow({ item }) {
                   })}
                 </div>
               )}
+
+              {/* Injuries & suspensions */}
+              {((pred.home_injuries?.length > 0) || (pred.away_injuries?.length > 0)) && (
+                <div className="space-y-0.5">
+                  {pred.home_injuries?.length > 0 && (
+                    <p className="text-xs text-red-400/80">
+                      <span className="text-zinc-500">{item.home_team}:</span>{" "}
+                      {pred.home_injuries.map(inj =>
+                        `${inj.player} (${inj.type})`
+                      ).join(", ")}
+                    </p>
+                  )}
+                  {pred.away_injuries?.length > 0 && (
+                    <p className="text-xs text-red-400/80">
+                      <span className="text-zinc-500">{item.away_team}:</span>{" "}
+                      {pred.away_injuries.map(inj =>
+                        `${inj.player} (${inj.type})`
+                      ).join(", ")}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Model adjustments applied */}
+              {pred.adjustments?.length > 0 && (
+                <div className="space-y-0.5">
+                  {pred.adjustments.map((adj, i) => (
+                    <p key={i} className="text-[11px] text-zinc-600 italic">{adj}</p>
+                  ))}
+                </div>
+              )}
+
+              {/* FBref quality signal */}
+              {(pred.home_fbref?.xgd != null || pred.away_fbref?.xgd != null) && (
+                <div className="flex gap-4 text-xs text-zinc-600">
+                  {pred.home_fbref?.xgd != null && (
+                    <span>
+                      {item.home_team} xGD{" "}
+                      <span className={pred.home_fbref.xgd > 0 ? "text-green-400" : "text-red-400"}>
+                        {pred.home_fbref.xgd > 0 ? "+" : ""}{pred.home_fbref.xgd.toFixed(2)}
+                      </span>
+                    </span>
+                  )}
+                  {pred.away_fbref?.xgd != null && (
+                    <span>
+                      {item.away_team} xGD{" "}
+                      <span className={pred.away_fbref.xgd > 0 ? "text-green-400" : "text-red-400"}>
+                        {pred.away_fbref.xgd > 0 ? "+" : ""}{pred.away_fbref.xgd.toFixed(2)}
+                      </span>
+                    </span>
+                  )}
+                </div>
+              )}
             </>
           )}
         </div>

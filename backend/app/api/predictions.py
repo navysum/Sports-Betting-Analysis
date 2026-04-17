@@ -153,6 +153,20 @@ async def today_predictions():
     return {**cached, "date": date_str}
 
 
+@router.get("/clv")
+async def clv_stats(days: int = 30):
+    """
+    Closing Line Value performance summary.
+
+    CLV > 0 on average = model consistently beats the Pinnacle closing line = real edge.
+    CLV ≤ 0 on average = model has no proven edge vs the sharpest market.
+
+    This is the single most important metric for a professional bettor.
+    """
+    from app.services.clv_tracker import get_clv_stats
+    return get_clv_stats(days=days)
+
+
 @router.post("/preload")
 async def trigger_preload():
     """Manually trigger today's prediction preload (idempotent)."""
