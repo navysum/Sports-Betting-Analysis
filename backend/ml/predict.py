@@ -161,11 +161,28 @@ def _kelly_fraction(model_prob: float, bookmaker_odds: float, fraction: float = 
     return round(min(kelly * fraction, 0.05), 4)  # cap at 5% of bankroll
 
 
+def _load_league_model(base_path: str, league_code: str) -> Optional[object]:
+    """
+    Try to load a league-specific model (e.g. result_model_PL.joblib).
+    Returns None if it doesn't exist — caller falls back to combined model.
+    """
+    if not league_code:
+        return None
+    league_path = base_path.replace(".joblib", f"_{league_code}.joblib")
+    if os.path.exists(league_path):
+        try:
+            return joblib.load(league_path)
+        except Exception:
+            pass
+    return None
+
+
 def predict(
     feature_vector: np.ndarray,
     bookmaker_odds: Optional[dict] = None,
     home_team: str = "",
     away_team: str = "",
+    league_code: str = "",
 ) -> dict:
     """
     Run all available models and return a comprehensive prediction dict.
@@ -182,8 +199,16 @@ def predict(
     vec  = feature_vector.reshape(1, -1)
     odds = bookmaker_odds or {}
 
+    # ── Per-league model (try first, fall back to combined) ───────────────────
+    # League-specific models are trained on per-competition data and can better
+    # capture league-specific dynamics (pace, physicality, draw rates, etc.).
+    active_result_model = _load_league_model(RESULT_MODEL_PATH, league_code) or _result_model
+    active_goals_model  = _load_league_model(GOALS_MODEL_PATH,  league_code) or _goals_model
+    active_btts_model   = _load_league_model(BTTS_MODEL_PATH,   league_code) or _btts_model
+    active_over35_model = _load_league_model(OVER35_MODEL_PATH, league_code) or _over35_model
+
     # ── XGBoost result model ──────────────────────────────────────────────────
-    result_probs = _proba(_result_model, _result_cal, vec)
+    result_probs = _proba(active_result_model, _result_cal, vec)
     if result_probs is not None:
         home_p = float(result_probs[0])
         draw_p = float(result_probs[1])
@@ -192,13 +217,13 @@ def predict(
         home_p = draw_p = away_p = 1 / 3
 
     # ── XGBoost goals + BTTS + over35 models ─────────────────────────────────
-    goals_probs = _proba(_goals_model, _goals_cal, vec)
+    goals_probs = _proba(active_goals_model, _goals_cal, vec)
     over25_prob = float(goals_probs[1]) if goals_probs is not None else 0.5
 
-    btts_probs = _proba(_btts_model, _btts_cal, vec)
+    btts_probs = _proba(active_btts_model, _btts_cal, vec)
     btts_prob  = float(btts_probs[1]) if btts_probs is not None else 0.5
 
-    over35_probs = _proba(_over35_model, _over35_cal, vec)
+    over35_probs = _proba(active_over35_model, _over35_cal, vec)
     over35_prob  = float(over35_probs[1]) if over35_probs is not None else 0.35
 
     # ── Dixon-Coles blend ─────────────────────────────────────────────────────
@@ -297,4 +322,7 @@ def predict(
         "correct_scores":    correct_scores,
         "xg_home":           xg_home,
         "xg_away":           xg_away,
+        "league_model_used": bool(league_code and os.path.exists(
+            RESULT_MODEL_PATH.replace(".joblib", f"_{league_code}.joblib")
+        )),
     }
