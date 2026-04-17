@@ -72,9 +72,20 @@ def log_prediction(
         except Exception:
             return None
 
-    # Map market names to odds dict keys
-    market_key = {"home": "home", "draw": "draw", "away": "away",
-                  "over25": None, "btts": None, "over35": None}.get(market, market)
+    # FIX #5: map market names to the correct odds dict keys.
+    # Previously over25/btts/over35 were mapped to None, so every goals-market CLV
+    # entry had implied_prob=None and was unusable. Now over25 maps to the "over25"
+    # key that _extract_best_odds() now populates from the Pinnacle totals market.
+    # btts and over35 remain None (not available from Pinnacle via The Odds API);
+    # those entries are still logged but clearly show no implied probability.
+    market_key = {
+        "home":   "home",
+        "draw":   "draw",
+        "away":   "away",
+        "over25": "over25",   # now populated from Pinnacle totals market
+        "over35": None,       # not available via The Odds API
+        "btts":   None,       # not available via The Odds API
+    }.get(market, market)
 
     entry = {
         "id":                      match_id,
