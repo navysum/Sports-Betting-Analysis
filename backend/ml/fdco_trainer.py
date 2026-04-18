@@ -109,6 +109,9 @@ def _rows_to_match_dicts(df: pd.DataFrame) -> list[dict]:
                 "_b365h": _safe_float(row, "B365H"),
                 "_b365d": _safe_float(row, "B365D"),
                 "_b365a": _safe_float(row, "B365A"),
+                # O/U 2.5 odds — column name uses ">" which pandas keeps as-is
+                "_b365_over25":  _safe_float(row, "B365>2.5"),
+                "_b365_under25": _safe_float(row, "B365<2.5"),
                 "_home": home,
                 "_away": away,
                 "_date": date_iso,
@@ -321,9 +324,13 @@ def build_fdco_training_data(
                     "result_label": result_label,
                     "goals_label": goals_label,
                     "btts_label": btts_label,
+                    "over35_label": over35_label,
                     "b365h": m.get("_b365h"),
                     "b365d": m.get("_b365d"),
                     "b365a": m.get("_b365a"),
+                    # O/U 2.5 odds for staking simulation — present in most FDCO seasons
+                    "b365_over25":  m.get("_b365_over25"),
+                    "b365_under25": m.get("_b365_under25"),
                     "feature_idx": len(X_all) - 1,  # index into X
                 })
 
