@@ -45,34 +45,35 @@ async def _run_retrain():
         # Step 1 — load cache
         _log("Loading accumulated data cache…")
         from ml.train import _load_cache, _merge, _save_cache, train_all, CACHE_PATH
-        X_cache, yr_cache, yg_cache, yb_cache, yo_cache = _load_cache()
+        X_cache, yr_cache, yg_cache, yb_cache, yo_cache, dates_cache = _load_cache()
         _log(f"Cache: {len(X_cache)} samples")
 
         # Step 2 — FDCO CSV data
         _log("Downloading Football-Data.co.uk CSVs…")
         from ml.fdco_trainer import build_fdco_training_data, download_all_csvs
         await download_all_csvs()
-        X_fdco, yr_fdco, yg_fdco, yb_fdco, yo_fdco, odds_rows_fdco = build_fdco_training_data()
+        X_fdco, yr_fdco, yg_fdco, yb_fdco, yo_fdco, odds_rows_fdco, dates_fdco = build_fdco_training_data()
         _log(f"FDCO: {len(X_fdco)} samples")
 
         # Step 3 — API data
         _log("Fetching API training data (rate-limited, this takes a few minutes)…")
         from ml.train import fetch_api_training_data
-        X_api, yr_api, yg_api, yb_api, yo_api = await fetch_api_training_data()
+        X_api, yr_api, yg_api, yb_api, yo_api, dates_api = await fetch_api_training_data()
         _log(f"API: {len(X_api)} samples")
 
         # Step 4 — merge + save cache
-        X, y_result, y_goals, y_btts, y_over35 = _merge(
+        X, y_result, y_goals, y_btts, y_over35, dates_merged = _merge(
             (X_cache, yr_cache, yg_cache, yb_cache, yo_cache),
             (X_fdco,  yr_fdco,  yg_fdco,  yb_fdco,  yo_fdco),
             (X_api,   yr_api,   yg_api,   yb_api,   yo_api),
+            dates_tuple=(dates_cache, dates_fdco, dates_api),
         )
         _log(f"Merged: {len(X)} unique samples")
 
         if len(X) < 50:
             raise RuntimeError(f"Not enough training data ({len(X)} samples). Check API key and CSV files.")
 
-        _save_cache(X, y_result, y_goals, y_btts, y_over35)
+        _save_cache(X, y_result, y_goals, y_btts, y_over35, dates_merged)
 
         # Step 5 — train
         _log("Training models…")
