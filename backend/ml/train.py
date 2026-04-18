@@ -35,6 +35,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import log_loss, brier_score_loss
 from sklearn.utils.class_weight import compute_sample_weight
 from ml.features import build_feature_vector, FEATURE_NAMES, N_FEATURES
+from ml.splits import split_indices, TRAIN_FRACTION, CALIBRATION_FRACTION, BLEND_FRACTION
 
 ML_DIR = os.path.dirname(__file__)
 RESULT_MODEL_PATH  = os.path.join(ML_DIR, "result_model.joblib")
@@ -245,22 +246,33 @@ def _train_and_calibrate(
     hparams: dict = None,
 ) -> dict:
     """
-    1. Temporal 80/20 split (first 80% = train, last 20% = calibration).
-    2. 5-fold stratified CV on training split for honest accuracy estimate.
+    1. Three-way chronological split (70/15/15):
+         train (70%) → XGBoost
+         cal   (15%) → probability calibration
+         blend (15%) → held back for optimize_blend.py (not touched here,
+                       but metrics are reported on it as the honest
+                       out-of-sample performance number).
+    2. TimeSeriesSplit 5-fold CV on training slice for honest accuracy.
     3. Final fit with early stopping (up to 1500 trees) on 85/15 sub-split.
     4. Draw (class 1) up-weighted via balanced sample_weight.
-    5. Isotonic calibrator on temporal holdout.
+    5. Calibrator fit on the cal slice (adaptive sigmoid/isotonic).
     6. SHAP feature importance logged.
+
+    Why this matters: previously the calibrator and the blend optimiser both
+    used the last 20% of data. The blend optimiser was measuring in-sample
+    Brier for the calibrator, overfitting the ensemble weights. Now the
+    blend slice [CAL_END:] is only ever seen by optimize_blend.py.
     """
     if len(np.unique(y)) < n_classes:
         n_classes = len(np.unique(y))
 
     hparams = hparams or {}
 
-    # Temporal 80/20 split
-    split = int(len(X) * 0.8)
-    X_train, X_cal = X[:split], X[split:]
-    y_train, y_cal = y[:split], y[split:]
+    # Three-way chronological split — boundaries defined in ml/splits.py so
+    # train.py and optimize_blend.py agree on exactly which rows go where.
+    train_end, cal_end = split_indices(len(X))
+    X_train, X_cal, X_blend = X[:train_end], X[train_end:cal_end], X[cal_end:]
+    y_train, y_cal, y_blend = y[:train_end], y[train_end:cal_end], y[cal_end:]
 
     # Sample weights — upweight draws / minority classes
     sample_weight = compute_sample_weight("balanced", y_train)
@@ -313,33 +325,62 @@ def _train_and_calibrate(
         calibrator = CalibratedClassifierCV(final_model, method=cal_method, cv="prefit")
         calibrator.fit(X_cal, y_cal)
         joblib.dump(calibrator, cal_path)
-        cal_probs = calibrator.predict_proba(X_cal)
+        prob_source = calibrator
     else:
-        # No calibrator — use raw model probs for metrics
-        cal_probs = final_model.predict_proba(X_cal)
+        prob_source = final_model
 
-    # Quality metrics
-    if n_classes > 2:
-        ll = log_loss(y_cal, cal_probs)
-        from sklearn.preprocessing import label_binarize
-        y_bin = label_binarize(y_cal, classes=list(range(n_classes)))
-        brier = float(np.mean((cal_probs - y_bin) ** 2))
+    # Evaluate on the held-back BLEND slice — genuinely out-of-sample for
+    # both the XGBoost model AND the calibrator, so this is the honest
+    # generalisation number. The cal-slice metrics are reported too, for
+    # diagnostic comparison (a large cal-vs-blend gap = calibrator
+    # overfitting the cal window, usually a sign the cal window is too
+    # small or isotonic is being used when sigmoid would be safer).
+    blend_probs = prob_source.predict_proba(X_blend) if len(X_blend) else None
+    cal_probs   = prob_source.predict_proba(X_cal)
+
+    def _metrics(probs, y_true):
+        if n_classes > 2:
+            ll = log_loss(y_true, probs, labels=list(range(n_classes)))
+            from sklearn.preprocessing import label_binarize
+            y_bin = label_binarize(y_true, classes=list(range(n_classes)))
+            br = float(np.mean((probs - y_bin) ** 2))
+        else:
+            ll = log_loss(y_true, probs, labels=[0, 1])
+            br = brier_score_loss(y_true, probs[:, 1])
+        return ll, br
+
+    cal_ll, cal_brier = _metrics(cal_probs, y_cal)
+    if blend_probs is not None and len(X_blend) > 10:
+        ll, brier = _metrics(blend_probs, y_blend)
+        blend_note = f"blend-holdout (n={len(X_blend)}, OOS for model+calibrator)"
     else:
-        ll    = log_loss(y_cal, cal_probs)
-        brier = brier_score_loss(y_cal, cal_probs[:, 1])
+        # Degenerate case — not enough blend data, fall back to cal metrics
+        ll, brier = cal_ll, cal_brier
+        blend_note = f"cal-slice fallback (n={len(X_cal)}, insufficient blend data)"
 
     print(
-        f"  {label} calibrator — {len(X_cal)} samples | "
+        f"  {label} {blend_note} | "
         f"log-loss={ll:.4f} | brier={brier:.4f}"
+    )
+    print(
+        f"  {label} cal-slice (n={len(X_cal)}) | "
+        f"log-loss={cal_ll:.4f} | brier={cal_brier:.4f}"
     )
 
     return {
-        "accuracy_mean": float(scores.mean()),
-        "accuracy_std":  float(scores.std()),
-        "best_trees":    int(best_trees),
-        "log_loss":      round(ll, 4),
-        "brier_score":   round(brier, 4),
-        "shap_top10":    shap_top10,
+        "accuracy_mean":   float(scores.mean()),
+        "accuracy_std":    float(scores.std()),
+        "best_trees":      int(best_trees),
+        # Headline numbers (blend holdout — genuinely OOS):
+        "log_loss":        round(ll, 4),
+        "brier_score":     round(brier, 4),
+        # Diagnostic (cal slice — in-sample for calibrator):
+        "cal_log_loss":    round(cal_ll, 4),
+        "cal_brier_score": round(cal_brier, 4),
+        "n_train":         int(len(X_train)),
+        "n_cal":           int(len(X_cal)),
+        "n_blend":         int(len(X_blend)),
+        "shap_top10":      shap_top10,
     }
 
 

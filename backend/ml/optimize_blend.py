@@ -13,8 +13,10 @@ Output:
 
 How it works:
   For each market (result / over25 / btts / over35) we try DC blend weights
-  in 0.05 steps from 0.0 to 1.0 and pick the weight that minimises Brier
-  score on the last 20% of FDCO data (chronological split — no leakage).
+  in 0.01 steps from 0.0 to 1.0 and pick the weight that minimises Brier
+  score on the BLEND slice of FDCO data — the last 15% chronologically,
+  which the calibrators in train.py never saw (they were fit on the 70–85%
+  slice). Boundaries defined in ml/splits.py.
 """
 import json
 import os
@@ -72,17 +74,24 @@ def optimise():
         print("One or more models missing. Run a full retrain first.")
         return
 
-    # Chronological holdout: last 20% of samples
+    # Chronological holdout: use the BLEND slice defined in ml/splits.py.
+    # This slice was NOT seen by the calibrators in train.py — it is the only
+    # part of the data that is genuinely out-of-sample for both the XGBoost
+    # models AND their calibrators. Previously this used int(n*0.80), which
+    # collided exactly with the calibrator's training window, producing
+    # in-sample Brier scores and overfit blend weights.
+    from ml.splits import split_indices
     n = len(X)
-    split = int(n * 0.80)
-    X_hold      = X[split:]
-    y_res_hold  = y_result[split:]
-    y_ou_hold   = y_goals[split:]
-    y_bt_hold   = y_btts[split:]
-    y_o35_hold  = y_over35[split:]
-    rows_hold   = odds_rows[split:]
+    _, cal_end = split_indices(n)
+    X_hold      = X[cal_end:]
+    y_res_hold  = y_result[cal_end:]
+    y_ou_hold   = y_goals[cal_end:]
+    y_bt_hold   = y_btts[cal_end:]
+    y_o35_hold  = y_over35[cal_end:]
+    rows_hold   = odds_rows[cal_end:]
 
-    print(f"Holdout size: {len(X_hold)} samples ({len(X_hold)/n:.0%} of total)")
+    print(f"Holdout size: {len(X_hold)} samples ({len(X_hold)/n:.0%} of total) — "
+          f"unseen by calibrators")
 
     # XGBoost probabilities on holdout
     xgb_result  = result_cal.predict_proba(X_hold)          # (N, 3)
