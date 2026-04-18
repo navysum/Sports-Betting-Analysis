@@ -20,10 +20,10 @@ Feature vector (44 features):
                     assigns near-zero importance; kept for vector position stability)
   Context (2):     season_stage, away_clean_sheet_rate
 
-PLANNED (next retrain): +2 draw-propensity features (home_draw_rate, away_draw_rate)
-  _draw_rate() helper is already implemented below. Add to np.array() + FEATURE_NAMES
-  and update N_FEATURES to 46 BEFORE triggering the next retrain. Do NOT deploy the
-  vector change without an accompanying retrain — XGBoost enforces exact feature count.
+NOTE: N_FEATURES changed from 44 → 46 when draw-propensity features were
+  activated. The training_cache.npz is automatically discarded on feature
+  mismatch (see _load_cache()). Always trigger a retrain immediately after
+  changing N_FEATURES — do not deploy this change without retraining.
 
 NOTE: Bookmaker odds are intentionally excluded from features. Including them
 causes the model to replicate market consensus instead of finding independent
@@ -297,7 +297,7 @@ def build_feature_vector(
     away_sot_avg: float = 0.0,
 ) -> np.ndarray:
     """
-    Returns a 1-D float32 numpy feature vector (44 features).
+    Returns a 1-D float32 numpy feature vector (46 features).
     Feature order MUST stay consistent with training — do not reorder.
     """
     # --- Form (exponentially weighted) ---
@@ -357,10 +357,9 @@ def build_feature_vector(
     # --- Season stage & context ---
     s_stage = _season_stage(match_date)
 
-    # Draw propensity computed but NOT yet in vector — add after next retrain.
-    # See PLANNED note in module docstring.
-    # home_draw_rate = _draw_rate(home_matches, home_id)
-    # away_draw_rate = _draw_rate(away_matches, away_id)
+    # --- Draw propensity (Audit Fix #11) ---
+    home_draw_rate = _draw_rate(home_matches, home_id)
+    away_draw_rate = _draw_rate(away_matches, away_id)
 
     return np.array([
         # Form (7)
@@ -386,6 +385,8 @@ def build_feature_vector(
         home_shots_avg, home_sot_avg, away_shots_avg, away_sot_avg,
         # Context (2)
         s_stage, away_cs_rate,
+        # Draw propensity (2) — Audit Fix #11
+        home_draw_rate, away_draw_rate,
     ], dtype=np.float32)
 
 
@@ -414,7 +415,8 @@ FEATURE_NAMES = [
     "home_shots_avg", "home_sot_avg", "away_shots_avg", "away_sot_avg",
     # Context (2)
     "season_stage", "away_clean_sheet_rate",
-    # PLANNED: "home_draw_rate", "away_draw_rate" — add here + in np.array() before next retrain
+    # Draw propensity (2) — Audit Fix #11
+    "home_draw_rate", "away_draw_rate",
 ]
 
-N_FEATURES = len(FEATURE_NAMES)  # 44
+N_FEATURES = len(FEATURE_NAMES)  # 46
