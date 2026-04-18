@@ -3,40 +3,42 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
+
+# Importing prediction logic and API fetchers
 from app.services.prediction_service import predict_match, predict_upcoming_batch
 from app.services.football_api import (
     get_upcoming_matches, get_all_today_matches,
     SUPPORTED_COMPETITIONS, FDORG_COMPETITIONS,
 )
 
+# Initialize the router with a prefix and tags for Swagger documentation
 router = APIRouter(prefix="/predictions", tags=["predictions"])
 
-# ── In-memory cache for today's predictions ───────────────────────────────────
+# --- In-memory cache for today's predictions ---
+# This avoids hitting the ML model and external APIs on every page refresh.
 # Structure: { date_str: {"status": "computing"|"ready", "predictions": [...], "total": int, "done": int} }
 _today_cache: dict = {}
 _preload_running: bool = False
 
 
 def _today_str() -> str:
+    """Returns today's date as a YYYY-MM-DD string."""
     return datetime.utcnow().strftime("%Y-%m-%d")
 
 
 async def preload_today_predictions() -> None:
     """
-    Background task: fetches all today's matches across all leagues and runs
-    predictions for each one, updating the cache progressively so the frontend
-    can poll and display results as they arrive.
-
-    If the API response cache is stale (>20 h), kicks off a background
-    cache refresh first so this and any subsequent preloads use fresh data.
+    BACKGROUND TASK: This is the core logic that prepares today's tips.
+    1. Fetches all matches for today across all supported leagues.
+    2. Runs the ML model for each match.
+    3. Progressively updates the in-memory cache so the frontend stays updated.
     """
     global _preload_running
     if _preload_running:
-        return
+        return  # Prevent multiple preloads from running at the same time
     _preload_running = True
 
-    # Trigger a cache refresh in the background if standings data is stale.
-    # This is a no-op if one is already running.
+    # Check if we need to refresh the standings/data cache before predicting
     try:
         from app.services.api_cache import any_stale
         from app.api.admin import _refresh_state, _run_cache_refresh, _refresh_lock
@@ -47,12 +49,14 @@ async def preload_today_predictions() -> None:
                     print("[preload] API cache is stale — triggering background refresh")
                     asyncio.create_task(_run_cache_refresh())
     except Exception:
-        pass  # never block predictions due to a cache check error
+        pass  # Never block predictions due to minor cache errors
 
     date_str = _today_str()
+    # Initialize the cache entry for today
     _today_cache[date_str] = {"status": "computing", "predictions": [], "done": 0, "total": 0}
 
     try:
+        # Fetch today's schedule
         matches = await get_all_today_matches()
         valid = [
             m for m in matches
@@ -61,6 +65,7 @@ async def preload_today_predictions() -> None:
         _today_cache[date_str]["total"] = len(valid)
         print(f"[preload] {len(valid)} matches to predict for {date_str}")
 
+        # Loop through matches and run predictions one by one
         for m in valid:
             home_id   = m["homeTeam"]["id"]
             away_id   = m["awayTeam"]["id"]
@@ -70,6 +75,7 @@ async def preload_today_predictions() -> None:
             match_date = (m.get("utcDate") or "")[:10]
 
             try:
+                # RUN THE ML MODEL
                 pred = await predict_match(
                     home_team_id=home_id,
                     away_team_id=away_id,
@@ -79,6 +85,8 @@ async def preload_today_predictions() -> None:
                     away_team_name=away_name,
                     match_date=match_date,
                 )
+                
+                # Append result to the cache
                 _today_cache[date_str]["predictions"].append({
                     "api_match_id":     m.get("id"),
                     "match_date":       m.get("utcDate"),
@@ -93,6 +101,7 @@ async def preload_today_predictions() -> None:
             except Exception as e:
                 print(f"[preload] prediction failed for {home_name} vs {away_name}: {e}")
 
+            # Update progress counter
             _today_cache[date_str]["done"] += 1
 
         _today_cache[date_str]["status"] = "ready"
@@ -106,9 +115,10 @@ async def preload_today_predictions() -> None:
         _preload_running = False
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# --- Request Models (Pydantic) ---
 
 class PredictRequest(BaseModel):
+    """Data required to request a prediction for a single match."""
     home_team_id: int
     away_team_id: int
     competition_code: str = "PL"
@@ -119,8 +129,11 @@ class PredictRequest(BaseModel):
     bookmaker_odds: Optional[dict] = None
 
 
+# --- API Endpoints ---
+
 @router.post("/predict")
 async def predict_single(body: PredictRequest):
+    """Allows manual triggering of a prediction for a specific game."""
     if body.competition_code not in FDORG_COMPETITIONS:
         raise HTTPException(400, f"Unsupported competition. Choose from: {list(FDORG_COMPETITIONS)}")
     try:
@@ -142,9 +155,8 @@ async def predict_single(body: PredictRequest):
 @router.get("/today")
 async def today_predictions():
     """
-    Returns cached today predictions with progress info.
-    Status: 'idle' | 'computing' | 'ready' | 'error'
-    While computing, predictions list grows progressively — poll every 5–10s.
+    MAIN DASHBOARD ENDPOINT: Returns all cached predictions for today.
+    Status will be 'computing' if the background task is still running.
     """
     date_str = _today_str()
     cached = _today_cache.get(date_str)
@@ -156,12 +168,8 @@ async def today_predictions():
 @router.get("/clv")
 async def clv_stats(days: int = 30):
     """
-    Closing Line Value performance summary.
-
-    CLV > 0 on average = model consistently beats the Pinnacle closing line = real edge.
-    CLV ≤ 0 on average = model has no proven edge vs the sharpest market.
-
-    This is the single most important metric for a professional bettor.
+    Returns 'Closing Line Value' performance stats.
+    This shows if the AI is consistently beating the bookmaker's closing odds.
     """
     from app.services.clv_tracker import get_clv_stats
     return get_clv_stats(days=days)
@@ -169,7 +177,7 @@ async def clv_stats(days: int = 30):
 
 @router.post("/preload")
 async def trigger_preload():
-    """Manually trigger today's prediction preload (idempotent)."""
+    """Manually force the background prediction task to start."""
     date_str = _today_str()
     cached = _today_cache.get(date_str)
     if cached and cached["status"] in ("computing", "ready"):
@@ -184,7 +192,7 @@ async def predict_upcoming(
     days_ahead: int = Query(1, ge=1, le=14),
     save_to_ledger: bool = Query(False),
 ):
-    """Returns upcoming matches with full multi-market predictions attached."""
+    """Returns predictions for matches happening in the next few days."""
     if competition not in FDORG_COMPETITIONS:
         raise HTTPException(400, "Unsupported competition.")
     try:
@@ -192,3 +200,4 @@ async def predict_upcoming(
         return {"competition": competition, "predictions": results}
     except Exception as e:
         raise HTTPException(502, f"Failed to fetch predictions: {e}")
+
