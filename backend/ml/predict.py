@@ -177,6 +177,28 @@ def _load_league_model(base_path: str, league_code: str) -> Optional[object]:
     return None
 
 
+def _load_league_calibrator(base_cal_path: str, league_code: str) -> Optional[object]:
+    """
+    Try to load a league-specific calibrator (e.g. result_calibrator_PL.joblib).
+    Returns None if absent — caller falls back to the global calibrator.
+
+    FIX #2: per-league models previously used the global calibrator, which was
+    fitted on the combined dataset (P(home)≈0.46). A PL-specific model outputs
+    P(home)≈0.52, so the global calibrator systematically pushed probabilities
+    the wrong way. Now each league that has enough training data gets its own
+    calibrator, trained on a holdout drawn from that league's data only.
+    """
+    if not league_code:
+        return None
+    league_cal_path = base_cal_path.replace(".joblib", f"_{league_code}.joblib")
+    if os.path.exists(league_cal_path):
+        try:
+            return joblib.load(league_cal_path)
+        except Exception:
+            pass
+    return None
+
+
 def predict(
     feature_vector: np.ndarray,
     bookmaker_odds: Optional[dict] = None,
@@ -199,16 +221,23 @@ def predict(
     vec  = feature_vector.reshape(1, -1)
     odds = bookmaker_odds or {}
 
-    # ── Per-league model (try first, fall back to combined) ───────────────────
-    # League-specific models are trained on per-competition data and can better
-    # capture league-specific dynamics (pace, physicality, draw rates, etc.).
+    # ── Per-league model + calibrator (try first, fall back to combined) ─────
+    # League-specific models capture per-competition dynamics (PL draw rate,
+    # BL1 high-scoring, FL1 home advantage etc.).
+    # FIX #2: also load per-league calibrators so the isotonic mapping is fitted
+    # on that league's own probability distribution, not the combined one.
     active_result_model = _load_league_model(RESULT_MODEL_PATH, league_code) or _result_model
     active_goals_model  = _load_league_model(GOALS_MODEL_PATH,  league_code) or _goals_model
     active_btts_model   = _load_league_model(BTTS_MODEL_PATH,   league_code) or _btts_model
     active_over35_model = _load_league_model(OVER35_MODEL_PATH, league_code) or _over35_model
 
+    active_result_cal  = _load_league_calibrator(RESULT_CAL_PATH,  league_code) or _result_cal
+    active_goals_cal   = _load_league_calibrator(GOALS_CAL_PATH,   league_code) or _goals_cal
+    active_btts_cal    = _load_league_calibrator(BTTS_CAL_PATH,    league_code) or _btts_cal
+    active_over35_cal  = _load_league_calibrator(OVER35_CAL_PATH,  league_code) or _over35_cal
+
     # ── XGBoost result model ──────────────────────────────────────────────────
-    result_probs = _proba(active_result_model, _result_cal, vec)
+    result_probs = _proba(active_result_model, active_result_cal, vec)
     if result_probs is not None:
         home_p = float(result_probs[0])
         draw_p = float(result_probs[1])
@@ -217,19 +246,20 @@ def predict(
         home_p = draw_p = away_p = 1 / 3
 
     # ── XGBoost goals + BTTS + over35 models ─────────────────────────────────
-    goals_probs = _proba(active_goals_model, _goals_cal, vec)
+    goals_probs = _proba(active_goals_model, active_goals_cal, vec)
     over25_prob = float(goals_probs[1]) if goals_probs is not None else 0.5
 
-    btts_probs = _proba(active_btts_model, _btts_cal, vec)
+    btts_probs = _proba(active_btts_model, active_btts_cal, vec)
     btts_prob  = float(btts_probs[1]) if btts_probs is not None else 0.5
 
-    over35_probs = _proba(active_over35_model, _over35_cal, vec)
+    over35_probs = _proba(active_over35_model, active_over35_cal, vec)
     over35_prob  = float(over35_probs[1]) if over35_probs is not None else 0.35
 
     # ── Dixon-Coles blend ─────────────────────────────────────────────────────
     dc_info = None
     correct_scores: list = []
     xg_home = xg_away = None
+    score_grid = score_grid_size = dc_rho = None
 
     if _dc_model and home_team and away_team:
         dc_info = _dc_model.match_probs(home_team, away_team)
@@ -257,6 +287,9 @@ def predict(
             correct_scores = dc_info.get("correct_scores", [])
             xg_home = dc_info.get("xg_home")
             xg_away = dc_info.get("xg_away")
+            score_grid      = dc_info.get("score_grid")
+            score_grid_size = dc_info.get("score_grid_size", 9)
+            dc_rho          = dc_info.get("rho")
 
     # ── Value bets (with Kelly sizing) ───────────────────────────────────────
     value_bets = []
@@ -320,9 +353,16 @@ def predict(
         "calibrated":        _result_cal is not None,
         "dc_available":      dc_info is not None,
         "correct_scores":    correct_scores,
+        "score_grid":        score_grid,
+        "score_grid_size":   score_grid_size,
+        "dc_rho":            dc_rho,
         "xg_home":           xg_home,
         "xg_away":           xg_away,
+        "bookmaker_odds":    dict(odds) if odds else None,
         "league_model_used": bool(league_code and os.path.exists(
             RESULT_MODEL_PATH.replace(".joblib", f"_{league_code}.joblib")
+        )),
+        "league_cal_used": bool(league_code and os.path.exists(
+            RESULT_CAL_PATH.replace(".joblib", f"_{league_code}.joblib")
         )),
     }
