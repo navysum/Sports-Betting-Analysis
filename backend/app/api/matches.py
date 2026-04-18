@@ -9,6 +9,11 @@ from app.services.football_api import (
     SUPPORTED_COMPETITIONS,
     FDORG_COMPETITIONS,
 )
+from app.services.rapidapi_football import (
+    get_sofascore_team_xg,
+    get_free_api_live_scores,
+    get_sportapi_live_scores,
+)
 
 router = APIRouter(prefix="/matches", tags=["matches"])
 
@@ -103,3 +108,36 @@ async def team_upcoming(
         return {"team_id": team_id, "matches": matches}
     except Exception as e:
         raise HTTPException(502, f"Failed to fetch upcoming fixtures: {e}")
+
+
+@router.get("/live")
+async def live_scores():
+    """
+    Currently in-play matches from RapidAPI (Sofascore / Free API fallback).
+    Cached for 90 seconds. Returns [] gracefully when no key is configured.
+    """
+    try:
+        scores = await get_sportapi_live_scores()
+        return {"count": len(scores), "matches": scores}
+    except Exception as e:
+        raise HTTPException(502, f"Failed to fetch live scores: {e}")
+
+
+@router.get("/team/xg")
+async def team_xg(
+    name: str = Query(..., description="Team name"),
+    competition: str = Query("PL"),
+):
+    """
+    Return a team's rolling xG stats from Sofascore.
+    Result: {last5_xg_for, last5_xg_against}
+    """
+    try:
+        xg = await get_sofascore_team_xg(name, competition)
+        if not xg:
+            raise HTTPException(404, f"No xG data found for '{name}'")
+        return {"team": name, "competition": competition, **xg}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"xG fetch failed: {e}")
