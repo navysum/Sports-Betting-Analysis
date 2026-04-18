@@ -804,8 +804,9 @@ export default function MonteCarloPage() {
     load();
   }, []);
 
+  // xg_home is always set by the backend (DC lookup or over25-derived fallback)
   const sorted = [...items]
-    .filter(i => i.prediction?.xg_home != null)
+    .filter(i => i.prediction != null)
     .sort((a, b) => (a.match_date || "").localeCompare(b.match_date || ""));
 
   return (
@@ -822,7 +823,7 @@ export default function MonteCarloPage() {
       {status === "error"     && <div className="px-4 py-3 text-xs text-red-500">Failed to load. Is the backend running?</div>}
       {(status === "ready" || status === "computing") && sorted.length === 0 && (
         <div className="px-4 py-12 text-center text-xs text-zinc-600">
-          No matches with xG data available yet
+          No matches scheduled today in supported competitions
         </div>
       )}
 

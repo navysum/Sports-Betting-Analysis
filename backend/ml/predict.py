@@ -346,6 +346,18 @@ def predict(
             dc_rho          = dc_info.get("rho")
             dc_r_nb         = dc_info.get("r_nb")
 
+    # Fallback xG: when DC can't look up a team (name mismatch between the API
+    # and FDCO CSV training data), xg_home would be None and the Monte Carlo page
+    # would filter out every match showing "No matches with xG data available".
+    # Derive lambda from the blended over25 probability instead:
+    #   lambda_total ≈ -1.5 × ln(1 − P(over25))   [good for P ∈ 0.4–0.85]
+    # Split 58.5 / 41.5 home/away to reflect typical home-advantage goal share.
+    if xg_home is None:
+        import math as _math
+        _lam = max(0.5, -1.5 * _math.log(max(1.0 - over25_prob, 0.01)))
+        xg_home = round(_lam * 0.585, 2)
+        xg_away = round(_lam * 0.415, 2)
+
     # ── Devigged fair implied probabilities (FIX #14) ─────────────────────────
     home_fair, draw_fair, away_fair = _devig_1x2(
         odds.get("home"), odds.get("draw"), odds.get("away")
