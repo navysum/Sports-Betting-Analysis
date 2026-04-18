@@ -5,13 +5,21 @@ Loads XGBoost models + isotonic calibrators at startup. Calibrators produce
 better-calibrated probabilities than raw XGBoost outputs — especially important
 for value bet edge calculations.
 
-Also blends Dixon-Coles Poisson model (when available and team names are known)
-to improve draw pricing and produce correct-score probabilities.
+Also blends Dixon-Coles Poisson/NB model (when available and team names are
+known) to improve draw pricing and produce correct-score probabilities.
 
-Computes:
-  - Star confidence rating (1–5)
-  - Value bet flags (where model prob > implied bookmaker prob)
-  - Dixon-Coles expected goals and correct-score distribution
+Fixes applied:
+  FIX #6  — Per-league calibrators are now cached in a module-level dict after
+             the first load. Previously they were deserialized from disk on every
+             single predict() call — 4 × joblib.load() per prediction.
+  FIX #14 — Value detection now uses devigged (margin-free) implied probabilities
+             for 1X2 markets. Raw bookmaker odds include a 4–8% overround, so
+             comparing model prob vs raw implied understated every edge figure.
+             For binary markets (over25, btts, over35) we use the Pinnacle
+             no-vig convention: if both sides are present we devig exactly;
+             otherwise we assume a 5% binary margin.
+  FIX #8  — DC match_probs() call now passes league_code so the per-league rho
+             τ-correction is used instead of the global average rho.
 """
 import json
 import os
@@ -32,6 +40,7 @@ def _load_blend_weights() -> dict:
     except (FileNotFoundError, json.JSONDecodeError):
         return dict(_DEFAULT_BLEND)
 
+
 RESULT_MODEL_PATH  = os.path.join(ML_DIR, "result_model.joblib")
 GOALS_MODEL_PATH   = os.path.join(ML_DIR, "goals_model.joblib")
 BTTS_MODEL_PATH    = os.path.join(ML_DIR, "btts_model.joblib")
@@ -42,7 +51,6 @@ GOALS_CAL_PATH     = os.path.join(ML_DIR, "goals_calibrator.joblib")
 BTTS_CAL_PATH      = os.path.join(ML_DIR, "btts_calibrator.joblib")
 OVER35_CAL_PATH    = os.path.join(ML_DIR, "over35_calibrator.joblib")
 
-# Legacy path for backward compatibility
 LEGACY_MODEL_PATH  = os.path.join(ML_DIR, "model.joblib")
 
 _result_model  = None
@@ -53,7 +61,12 @@ _result_cal    = None
 _goals_cal     = None
 _btts_cal      = None
 _over35_cal    = None
-_dc_model      = None   # Dixon-Coles model (optional)
+_dc_model      = None
+
+# FIX #6: module-level caches so per-league models/calibrators are loaded from
+# disk at most once per server lifetime instead of on every predict() call.
+_league_model_cache: dict[str, Optional[object]] = {}
+_league_cal_cache:   dict[str, Optional[object]] = {}
 
 
 def load_model():
@@ -98,12 +111,13 @@ def load_model():
             globals()[var_name] = joblib.load(path)
             print(f"{name.capitalize()} calibrator loaded.")
 
-    # Dixon-Coles model (optional — present after first retrain post-upgrade)
     try:
         from ml.dixon_coles import load_dc_model
         _dc_model = load_dc_model()
         if _dc_model:
-            print(f"Dixon-Coles model loaded ({len(_dc_model.attack)} teams).")
+            print(f"Dixon-Coles model loaded ({len(_dc_model.attack)} teams, "
+                  f"r_nb={_dc_model.r_nb:.1f}, "
+                  f"{len(_dc_model.rho_by_league)} league rhos).")
         else:
             print("Dixon-Coles model not found (will fit on next retrain).")
     except Exception as e:
@@ -119,10 +133,100 @@ def _proba(model, calibrator, vec: np.ndarray) -> Optional[np.ndarray]:
     return None
 
 
+def _load_league_model(base_path: str, league_code: str) -> Optional[object]:
+    """
+    FIX #6: cached load of a league-specific model.
+    Returns None if absent — caller falls back to the combined model.
+    """
+    if not league_code:
+        return None
+    cache_key = f"{base_path}|{league_code}"
+    if cache_key in _league_model_cache:
+        return _league_model_cache[cache_key]
+
+    league_path = base_path.replace(".joblib", f"_{league_code}.joblib")
+    result = None
+    if os.path.exists(league_path):
+        try:
+            result = joblib.load(league_path)
+        except Exception:
+            pass
+    _league_model_cache[cache_key] = result
+    return result
+
+
+def _load_league_calibrator(base_cal_path: str, league_code: str) -> Optional[object]:
+    """
+    FIX #6: cached load of a league-specific calibrator.
+    Previously called joblib.load() on every single predict() invocation;
+    now loaded at most once per league per server lifetime.
+    """
+    if not league_code:
+        return None
+    cache_key = f"{base_cal_path}|{league_code}"
+    if cache_key in _league_cal_cache:
+        return _league_cal_cache[cache_key]
+
+    league_cal_path = base_cal_path.replace(".joblib", f"_{league_code}.joblib")
+    result = None
+    if os.path.exists(league_cal_path):
+        try:
+            result = joblib.load(league_cal_path)
+        except Exception:
+            pass
+    _league_cal_cache[cache_key] = result
+    return result
+
+
+# ─── Devigging helpers (FIX #14) ─────────────────────────────────────────────
+
+def _devig_1x2(
+    home_odds: Optional[float],
+    draw_odds: Optional[float],
+    away_odds: Optional[float],
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Remove bookmaker margin from 1X2 decimal odds.
+
+    Returns fair implied probabilities (sum to 1.0) or (None, None, None) if
+    any price is missing or invalid.
+
+    Without devigging a 4–8% overround causes every edge figure to be
+    understated — a model at 52% vs fair 50% shows as no value against
+    vig-inflated 54.1% implied.
+    """
+    if not all(o and o > 1.0 for o in [home_odds, draw_odds, away_odds]):
+        return None, None, None
+    total = (1 / home_odds) + (1 / draw_odds) + (1 / away_odds)
+    if total <= 0:
+        return None, None, None
+    return (1 / home_odds) / total, (1 / draw_odds) / total, (1 / away_odds) / total
+
+
+def _devig_binary(
+    odds_a: Optional[float],
+    odds_b: Optional[float] = None,
+) -> Optional[float]:
+    """
+    Remove overround from one side of a binary market.
+
+    If both sides are provided (e.g. over25 + under25) devigging is exact.
+    If only one side is available we assume a 5% binary margin:
+      fair_implied ≈ raw_implied / 1.025
+    """
+    if not odds_a or odds_a <= 1.0:
+        return None
+    raw = 1.0 / odds_a
+    if odds_b and odds_b > 1.0:
+        total = raw + (1.0 / odds_b)
+        return raw / total
+    # single-sided approximation (5% binary margin)
+    return min(max(raw / 1.025, 0.01), 0.99)
+
+
 def _star_rating(value_bets: list, best_edge: float, confidence: float) -> int:
     """
     Stars reflect betting quality (edge over market), not raw win probability.
-    If we have no odds, fall back to confidence-based rating.
       5★ = large edge (≥15%) or very high confidence (≥72%)
       4★ = solid edge (≥9%) or high confidence (≥62%)
       3★ = moderate edge (≥5%) or decent confidence (≥52%)
@@ -134,7 +238,6 @@ def _star_rating(value_bets: list, best_edge: float, confidence: float) -> int:
         if best_edge >= 0.09: return 4
         if best_edge >= 0.05: return 3
         return 2
-    # No odds available — fall back to confidence
     if confidence >= 0.72: return 5
     if confidence >= 0.62: return 4
     if confidence >= 0.52: return 3
@@ -142,61 +245,23 @@ def _star_rating(value_bets: list, best_edge: float, confidence: float) -> int:
     return 1
 
 
-def _is_value(model_prob: float, bookmaker_odds: Optional[float], min_edge: float = 0.03) -> bool:
-    if bookmaker_odds is None or bookmaker_odds <= 1.0:
+def _is_value(model_prob: float, fair_implied: Optional[float], min_edge: float = 0.03) -> bool:
+    """Compare model probability vs fair (devigged) implied probability."""
+    if fair_implied is None:
         return False
-    implied_prob = 1 / bookmaker_odds
-    return model_prob > (implied_prob + min_edge)
+    return model_prob > (fair_implied + min_edge)
 
 
 def _kelly_fraction(model_prob: float, bookmaker_odds: float, fraction: float = 0.25) -> float:
     """Quarter-Kelly stake as a fraction of bankroll. Returns 0.0 if no edge."""
-    if bookmaker_odds <= 1.0:
+    if not bookmaker_odds or bookmaker_odds <= 1.0:
         return 0.0
-    b = bookmaker_odds - 1.0          # net odds (profit per unit staked)
+    b = bookmaker_odds - 1.0
     q = 1.0 - model_prob
-    kelly = (b * model_prob - q) / b  # full Kelly
+    kelly = (b * model_prob - q) / b
     if kelly <= 0:
         return 0.0
-    return round(min(kelly * fraction, 0.05), 4)  # cap at 5% of bankroll
-
-
-def _load_league_model(base_path: str, league_code: str) -> Optional[object]:
-    """
-    Try to load a league-specific model (e.g. result_model_PL.joblib).
-    Returns None if it doesn't exist — caller falls back to combined model.
-    """
-    if not league_code:
-        return None
-    league_path = base_path.replace(".joblib", f"_{league_code}.joblib")
-    if os.path.exists(league_path):
-        try:
-            return joblib.load(league_path)
-        except Exception:
-            pass
-    return None
-
-
-def _load_league_calibrator(base_cal_path: str, league_code: str) -> Optional[object]:
-    """
-    Try to load a league-specific calibrator (e.g. result_calibrator_PL.joblib).
-    Returns None if absent — caller falls back to the global calibrator.
-
-    FIX #2: per-league models previously used the global calibrator, which was
-    fitted on the combined dataset (P(home)≈0.46). A PL-specific model outputs
-    P(home)≈0.52, so the global calibrator systematically pushed probabilities
-    the wrong way. Now each league that has enough training data gets its own
-    calibrator, trained on a holdout drawn from that league's data only.
-    """
-    if not league_code:
-        return None
-    league_cal_path = base_cal_path.replace(".joblib", f"_{league_code}.joblib")
-    if os.path.exists(league_cal_path):
-        try:
-            return joblib.load(league_cal_path)
-        except Exception:
-            pass
-    return None
+    return round(min(kelly * fraction, 0.05), 4)
 
 
 def predict(
@@ -210,22 +275,15 @@ def predict(
     Run all available models and return a comprehensive prediction dict.
 
     bookmaker_odds (optional): {"home": 2.10, "draw": 3.40, "away": 3.20,
-                                "over25": 1.85, "btts": 1.75}
-    home_team / away_team: used for Dixon-Coles lookup (FDCO team names).
-
-    Returns:
-        home_win_prob, draw_prob, away_win_prob, predicted_outcome, confidence,
-        stars, over25_prob, btts_prob, over25_predicted, btts_predicted,
-        value_bets, calibrated, dc_available, correct_scores, xg_home, xg_away
+                                "over25": 1.85, "under25": 1.95,
+                                "btts": 1.75, "over35": 2.80}
+    home_team / away_team: FDCO team names for Dixon-Coles lookup.
+    league_code: competition code (e.g. "PL") for per-league rho (FIX #8).
     """
     vec  = feature_vector.reshape(1, -1)
     odds = bookmaker_odds or {}
 
-    # ── Per-league model + calibrator (try first, fall back to combined) ─────
-    # League-specific models capture per-competition dynamics (PL draw rate,
-    # BL1 high-scoring, FL1 home advantage etc.).
-    # FIX #2: also load per-league calibrators so the isotonic mapping is fitted
-    # on that league's own probability distribution, not the combined one.
+    # ── Per-league model + calibrator (FIX #6: cached loads) ─────────────────
     active_result_model = _load_league_model(RESULT_MODEL_PATH, league_code) or _result_model
     active_goals_model  = _load_league_model(GOALS_MODEL_PATH,  league_code) or _goals_model
     active_btts_model   = _load_league_model(BTTS_MODEL_PATH,   league_code) or _btts_model
@@ -245,84 +303,82 @@ def predict(
     else:
         home_p = draw_p = away_p = 1 / 3
 
-    # ── XGBoost goals + BTTS + over35 models ─────────────────────────────────
-    goals_probs = _proba(active_goals_model, active_goals_cal, vec)
-    over25_prob = float(goals_probs[1]) if goals_probs is not None else 0.5
-
-    btts_probs = _proba(active_btts_model, active_btts_cal, vec)
-    btts_prob  = float(btts_probs[1]) if btts_probs is not None else 0.5
-
+    goals_probs  = _proba(active_goals_model,  active_goals_cal,  vec)
+    over25_prob  = float(goals_probs[1])  if goals_probs  is not None else 0.5
+    btts_probs   = _proba(active_btts_model,   active_btts_cal,   vec)
+    btts_prob    = float(btts_probs[1])   if btts_probs   is not None else 0.5
     over35_probs = _proba(active_over35_model, active_over35_cal, vec)
     over35_prob  = float(over35_probs[1]) if over35_probs is not None else 0.35
 
-    # ── Dixon-Coles blend ─────────────────────────────────────────────────────
+    # ── Dixon-Coles blend (FIX #8: pass league for per-league rho) ───────────
     dc_info = None
     correct_scores: list = []
     xg_home = xg_away = None
-    score_grid = score_grid_size = dc_rho = None
+    score_grid = score_grid_size = dc_rho = dc_r_nb = None
 
     if _dc_model and home_team and away_team:
-        dc_info = _dc_model.match_probs(home_team, away_team)
+        dc_info = _dc_model.match_probs(home_team, away_team, league=league_code)
         if dc_info:
             bw = _load_blend_weights()
 
-            w_res  = bw["result"];  w_xgb_res  = 1.0 - w_res
-            w_ou   = bw["over25"];  w_xgb_ou   = 1.0 - w_ou
-            w_bt   = bw["btts"];    w_xgb_bt   = 1.0 - w_bt
-            w_o35  = bw["over35"];  w_xgb_o35  = 1.0 - w_o35
+            w_res = bw["result"];  w_xgb_res = 1.0 - w_res
+            w_ou  = bw["over25"]; w_xgb_ou  = 1.0 - w_ou
+            w_bt  = bw["btts"];   w_xgb_bt  = 1.0 - w_bt
+            w_o35 = bw["over35"]; w_xgb_o35 = 1.0 - w_o35
 
-            home_p    = w_xgb_res * home_p  + w_res * dc_info["home"]
-            draw_p    = w_xgb_res * draw_p  + w_res * dc_info["draw"]
-            away_p    = w_xgb_res * away_p  + w_res * dc_info["away"]
+            home_p    = w_xgb_res * home_p    + w_res * dc_info["home"]
+            draw_p    = w_xgb_res * draw_p    + w_res * dc_info["draw"]
+            away_p    = w_xgb_res * away_p    + w_res * dc_info["away"]
             over25_prob = w_xgb_ou * over25_prob + w_ou * dc_info["over25"]
             btts_prob   = w_xgb_bt * btts_prob   + w_bt * dc_info["btts"]
             if "over35" in dc_info:
                 over35_prob = w_xgb_o35 * over35_prob + w_o35 * dc_info["over35"]
 
-            # Renormalise result probs to sum to 1
             total = home_p + draw_p + away_p
             if total > 0:
                 home_p /= total; draw_p /= total; away_p /= total
 
-            correct_scores = dc_info.get("correct_scores", [])
-            xg_home = dc_info.get("xg_home")
-            xg_away = dc_info.get("xg_away")
+            correct_scores  = dc_info.get("correct_scores", [])
+            xg_home         = dc_info.get("xg_home")
+            xg_away         = dc_info.get("xg_away")
             score_grid      = dc_info.get("score_grid")
             score_grid_size = dc_info.get("score_grid_size", 9)
             dc_rho          = dc_info.get("rho")
+            dc_r_nb         = dc_info.get("r_nb")
 
-    # ── Value bets (with Kelly sizing) ───────────────────────────────────────
-    value_bets = []
-    kelly_stakes = {}   # market → quarter-Kelly fraction
-    edges = {}          # market → raw edge (model_prob - implied_prob)
+    # ── Devigged fair implied probabilities (FIX #14) ─────────────────────────
+    home_fair, draw_fair, away_fair = _devig_1x2(
+        odds.get("home"), odds.get("draw"), odds.get("away")
+    )
+    over25_fair = _devig_binary(odds.get("over25"), odds.get("under25"))
+    over35_fair = _devig_binary(odds.get("over35"), odds.get("under35"))
+    btts_fair   = _devig_binary(odds.get("btts"),   odds.get("btts_no"))
+
+    # ── Value bets (FIX #14: compare vs fair implied, not raw implied) ────────
+    value_bets   = []
+    kelly_stakes = {}
+    edges        = {}
 
     checks = [
-        ("home",   home_p,      odds.get("home")),
-        ("draw",   draw_p,      odds.get("draw")),
-        ("away",   away_p,      odds.get("away")),
-        ("over25", over25_prob, odds.get("over25")),
-        ("over35", over35_prob, odds.get("over35")),
-        ("btts",   btts_prob,   odds.get("btts")),
+        ("home",   home_p,      home_fair,   odds.get("home"),   "Home Win"),
+        ("draw",   draw_p,      draw_fair,   odds.get("draw"),   "Draw"),
+        ("away",   away_p,      away_fair,   odds.get("away"),   "Away Win"),
+        ("over25", over25_prob, over25_fair, odds.get("over25"), "Over 2.5"),
+        ("over35", over35_prob, over35_fair, odds.get("over35"), "Over 3.5"),
+        ("btts",   btts_prob,   btts_fair,   odds.get("btts"),   "BTTS Yes"),
     ]
-    labels = {
-        "home":   "Home Win",
-        "draw":   "Draw",
-        "away":   "Away Win",
-        "over25": "Over 2.5",
-        "over35": "Over 3.5",
-        "btts":   "BTTS Yes",
-    }
 
-    for key, prob, book_odds in checks:
-        if _is_value(prob, book_odds):
-            implied = 1 / book_odds
-            edge = prob - implied
+    for key, prob, fair_implied, book_odds, label in checks:
+        if _is_value(prob, fair_implied):
+            edge = prob - fair_implied
             edges[key] = edge
             k = _kelly_fraction(prob, book_odds)
             kelly_stakes[key] = k
+            raw_implied = (1 / book_odds) if book_odds and book_odds > 1 else None
             value_bets.append(
-                f"{labels[key]} (model {prob:.0%} vs implied {implied:.0%}, "
-                f"edge +{edge:.0%}, Kelly {k:.1%})"
+                f"{label} (model {prob:.0%} vs fair {fair_implied:.0%}"
+                + (f" / vig {raw_implied:.0%}" if raw_implied else "")
+                + f", edge +{edge:.0%}, Kelly {k:.1%})"
             )
 
     best_edge = max(edges.values()) if edges else 0.0
@@ -356,6 +412,7 @@ def predict(
         "score_grid":        score_grid,
         "score_grid_size":   score_grid_size,
         "dc_rho":            dc_rho,
+        "dc_r_nb":           dc_r_nb,
         "xg_home":           xg_home,
         "xg_away":           xg_away,
         "bookmaker_odds":    dict(odds) if odds else None,

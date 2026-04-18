@@ -204,6 +204,7 @@ def build_fdco_training_data(
         # Fresh ELO for each league — cross-league mixing not meaningful for domestic
         elo = EloSystem()
         league_elo[league_code] = elo
+        _prev_season_teams: list[str] = []  # teams in the previous season (for reversion)
 
         for season in SEASONS:
             path = os.path.join(csv_dir, f"{league_code}_{season}.csv")
@@ -223,6 +224,13 @@ def build_fdco_training_data(
             total_files += 1
             # Sort by date for sequential form/standings computation
             match_dicts.sort(key=lambda m: m.get("utcDate", ""))
+
+            # FIX #7: apply seasonal ELO mean reversion before processing each
+            # new season so that summer squad changes are partially absorbed.
+            # We revert the teams from the PREVIOUS season (not the incoming
+            # season, which we haven't seen yet).
+            if _prev_season_teams:
+                elo.apply_season_reversion(_prev_season_teams)
 
             table = _RunningTable()
             team_history: dict[int, list[dict]] = {}  # team_id → match list
@@ -325,6 +333,9 @@ def build_fdco_training_data(
                 team_history.setdefault(away_id, []).append(m)
                 elo.process_match(home_name, away_name, hg, ag)
 
+            # Remember which teams were active this season for next-season reversion
+            _prev_season_teams = list(table._table.keys())
+
     if not X_all:
         print(f"  [fdco] No CSV data found in {csv_dir}. Run scraper first.")
         return (
@@ -333,14 +344,17 @@ def build_fdco_training_data(
             [], np.array([], dtype="U10"),
         )
 
-    # Persist merged ELO ratings (most recent per-league ratings saved globally)
-    # Teams in different leagues keep separate histories, merged here for inference
+    # Persist merged ELO ratings (most recent per-league ratings saved globally).
+    # FIX #17: previously kept the *highest* rating across leagues, which meant a
+    # team relegated from PL to ELC would carry an inflated PL ELO permanently.
+    # Now we unconditionally overwrite — iteration order in FDCO_LEAGUES means
+    # ELC is processed immediately after PL, so a relegated team's Championship
+    # ELO (the correct current context) wins. Promoted teams likewise get their
+    # new-league ELO (which started fresh at 1500 for that league).
     merged_elo = EloSystem()
     for elo in league_elo.values():
         for team, rating in elo._ratings.items():
-            # If same team name in multiple leagues (rare), keep higher rating
-            if team not in merged_elo._ratings or rating > merged_elo._ratings[team]:
-                merged_elo._ratings[team] = rating
+            merged_elo._ratings[team] = rating  # always overwrite; last league wins
     save_elo_ratings(merged_elo)
 
     print(f"  [fdco] {total_files} CSV files -> {len(X_all)} training samples")
