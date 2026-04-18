@@ -11,6 +11,7 @@ CLV tracking: every prediction is logged with opening Pinnacle odds so we can
 measure whether the model consistently beats the closing line over time.
 """
 import asyncio
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -24,14 +25,37 @@ from app.services.scraper import fetch_understat_team_xg
 from app.services.evaluator import append_prediction, build_ledger_entry
 from app.services.odds_api import find_match_odds, find_pinnacle_odds
 from app.services.injury_service import get_team_injuries, injury_adjustment
-from app.services.fbref_scraper import get_team_xg_stats
+# FIX #11: FBref scraper removed from the prediction hot-path.
+# get_team_xg_stats() scraped FBref on every prediction request — it typically
+# took 2–4 s, raised for rate-limit blocks, and the xPts adjustment it powered
+# has been disabled (see _xpts_adjustment comment below). The import is kept as
+# a commented reference so it can be re-enabled if an independent backtest
+# validates the xPts signal in the future.
+# from app.services.fbref_scraper import get_team_xg_stats
 from app.services.clv_tracker import log_prediction
 from app.utils.team_names import resolve as resolve_team
 from ml.features import build_feature_vector
 from ml.predict import predict
 from ml.elo import load_elo_ratings, EloSystem
 
-_elo: EloSystem = load_elo_ratings()
+# FIX #12: TTL-based ELO refresh.
+# ELO ratings are trained once and cached on disk. When a retrain runs on the
+# server (e.g. nightly cron), the in-memory _elo object is stale until the next
+# process restart. We reload from disk every hour so the live system picks up
+# updated ratings without requiring a full restart.
+_ELO_TTL: float = 3600.0          # seconds between disk reloads
+
+_elo: EloSystem       = load_elo_ratings()
+_elo_loaded_at: float = time.monotonic()
+
+
+def _get_elo() -> EloSystem:
+    """Return the module-level ELO system, refreshing from disk if the TTL has expired."""
+    global _elo, _elo_loaded_at
+    if time.monotonic() - _elo_loaded_at > _ELO_TTL:
+        _elo           = load_elo_ratings()
+        _elo_loaded_at = time.monotonic()
+    return _elo
 
 # FIX #3 — xG scale mismatch between training and inference.
 # During training (FDCO CSVs), xG features are computed as: sot_rolling_avg × 0.27
@@ -122,6 +146,10 @@ async def predict_match(
     date_str = match_date or datetime.utcnow().strftime("%Y-%m-%d")
 
     # ── Core data fetch (parallel) ────────────────────────────────────────────
+    # FIX #11: FBref calls removed — get_team_xg_stats() was adding 2–4 s of
+    # latency on every request and the xPts signal it supplied has been disabled.
+    # home_fbref / away_fbref default to empty dicts; the frontend still handles
+    # them gracefully (they're optional display fields, not used in probability).
     (
         home_matches,
         away_matches,
@@ -130,8 +158,6 @@ async def predict_match(
         away_xg_data,
         home_injuries,
         away_injuries,
-        home_fbref,
-        away_fbref,
     ) = await asyncio.gather(
         _safe(get_team_matches(home_team_id, limit=25)),
         _safe(get_team_matches(away_team_id, limit=25)),
@@ -140,9 +166,9 @@ async def predict_match(
         _safe(fetch_understat_team_xg(away_team_name, competition_code), {}),
         _safe(get_team_injuries(home_team_name, competition_code, date_str), []),
         _safe(get_team_injuries(away_team_name, competition_code, date_str), []),
-        _safe(get_team_xg_stats(home_team_name, competition_code), {}),
-        _safe(get_team_xg_stats(away_team_name, competition_code), {}),
     )
+    home_fbref: dict = {}
+    away_fbref: dict = {}
 
     # H2H — only if we have a match ID
     h2h_matches = []
@@ -162,7 +188,8 @@ async def predict_match(
     home_fdco = resolve_team(home_team_name) if home_team_name else home_team_name
     away_fdco = resolve_team(away_team_name) if away_team_name else away_team_name
 
-    elo_diff = _elo.get_diff(home_fdco, away_fdco) if home_fdco else 0.0
+    # FIX #12: use _get_elo() to get TTL-refreshed ELO ratings
+    elo_diff = _get_elo().get_diff(home_fdco, away_fdco) if home_fdco else 0.0
 
     # Fetch best-available odds + Pinnacle odds in parallel
     if bookmaker_odds is None and home_team_name and competition_code:
@@ -259,7 +286,13 @@ async def predict_match(
 
     # ── CLV logging ───────────────────────────────────────────────────────────
     if home_team_name and away_team_name:
-        match_id = _make_match_id(competition_code, date_str, home_team_name, away_team_name)
+        # FIX #21: use the API's stable numeric match ID for CLV tracking instead
+        # of the name-abbreviation slug. The old slug (e.g. "PL-2024-10-05-MANCHE-LIVE")
+        # was non-unique for same-day derbies and silently collided in the ledger,
+        # corrupting CLV measurements. Fall back to the slug only when no API ID.
+        match_id = str(api_match_id) if api_match_id else _make_match_id(
+            competition_code, date_str, home_team_name, away_team_name
+        )
         # FIX #5: log over25 CLV now that Pinnacle totals odds are available.
         # btts / over35 remain logged without implied_prob (no Pinnacle line available).
         for market, prob_key in [
@@ -286,7 +319,10 @@ async def predict_match(
     # ── Ledger ────────────────────────────────────────────────────────────────
     if save_to_ledger and home_team_name and away_team_name:
         league_name = _competition_name(competition_code)
-        match_id = _make_match_id(competition_code, date_str, home_team_name, away_team_name)
+        # FIX #21 (ledger path): same stable ID as CLV logging above
+        match_id = str(api_match_id) if api_match_id else _make_match_id(
+            competition_code, date_str, home_team_name, away_team_name
+        )
 
         key_factors = _summarise_factors(
             home_team_name, away_team_name, result,

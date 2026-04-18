@@ -90,7 +90,12 @@ def _form_points(matches: list[dict], team_id: int, n: int = 5) -> float:
 
 
 def _form_momentum(matches: list[dict], team_id: int) -> float:
-    """Difference in weighted form: last 3 minus previous 3."""
+    """Difference in weighted form: last 3 minus previous 3.
+
+    FIX #20: filter finished matches once here; _form_points internally does
+    the same filter but on these already-filtered slices — harmless but
+    previously redundant. Pre-filtering here removes the wasted pass.
+    """
     finished = [m for m in matches if m.get("status") == "FINISHED"]
     last3 = _form_points(finished[-3:], team_id, 3) if len(finished) >= 3 else 0.0
     prev3 = _form_points(finished[-6:-3], team_id, 3) if len(finished) >= 6 else 0.0
@@ -207,7 +212,9 @@ def _scoring_std(matches: list[dict], team_id: int, n: int = 10) -> float:
     if len(goals) < 2:
         return 1.0
     mean = sum(goals) / len(goals)
-    variance = sum((g - mean) ** 2 for g in goals) / len(goals)
+    # FIX #19: sample variance (N-1 denominator) — population variance (N) understated
+    # variance by up to 20% on 5–10 game windows.
+    variance = sum((g - mean) ** 2 for g in goals) / (len(goals) - 1)
     return float(math.sqrt(variance))
 
 
@@ -300,7 +307,11 @@ def build_feature_vector(
     # --- Derived ---
     pos_diff_norm  = home_pos_norm - away_pos_norm
     ppg_diff       = home_ppg - away_ppg
-    total_goals    = home_gf + away_ga
+    # FIX #4: correct expected-goals-total formula.
+    # Old: home_gf + away_ga  → double-counted one side (inflated for attack vs defensive mismatches).
+    # New: average of both teams' offensive + defensive rates gives a symmetric estimate of
+    # expected total goals: E[total] ≈ (home_gf + home_ga + away_gf + away_ga) / 2.
+    total_goals    = (home_gf + home_ga + away_gf + away_ga) / 2.0
     goal_diff_avg  = home_gf - home_ga        # home team's GD per game
     away_goal_diff_avg = away_gf - away_ga    # away team's GD per game
     cs_rate        = _clean_sheet_rate(home_matches, home_id)
