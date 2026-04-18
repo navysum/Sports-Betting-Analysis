@@ -1,18 +1,24 @@
-name: Daily Data Cache Refresh
+name: Daily Data Cache Refresh + CLV Snapshot
 
-# Runs at 01:00 AM UTC every day.
-# Wakes the Render backend (which sleeps on the free tier) and tells it
-# to pre-fetch standings, finished matches, and today's team histories.
-# This means the first user of the day gets instant predictions instead
-# of waiting for all the rate-limited API calls to complete.
+# Runs two jobs:
+#
+# 1. cache-refresh at 01:00 UTC: pre-warms API cache (standings, finished
+#    matches, team histories) so morning predictions are instant.
+#
+# 2. clv-snapshot at 11:30 UTC: captures Pinnacle odds ~90 min before most
+#    UK 3pm Saturday kickoffs. These are the closest-to-closing odds we can
+#    get without a paid historical odds API. The snapshot updates any CLV log
+#    entries that still lack pinnacle_closing_implied.
 
 on:
   schedule:
-    - cron: "0 1 * * *"   # 01:00 AM UTC daily
-  workflow_dispatch:        # allow manual trigger from GitHub UI
+    - cron: "0 1 * * *"    # 01:00 UTC — data cache refresh
+    - cron: "30 11 * * *"  # 11:30 UTC — CLV closing-line snapshot
+  workflow_dispatch:         # allow manual trigger from GitHub UI
 
 jobs:
-  refresh:
+  cache-refresh:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && startsWith(github.event.schedule, '0 1'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -29,3 +35,21 @@ jobs:
           curl -sf -X POST \
             https://sports-betting-analysis.onrender.com/api/admin/refresh-cache
           echo "Cache refresh triggered successfully."
+
+  clv-snapshot:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && startsWith(github.event.schedule, '30 11'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Wake backend
+        run: |
+          curl -sf --retry 3 --retry-delay 10 \
+            https://sports-betting-analysis.onrender.com/health || true
+
+      - name: Trigger CLV closing-line snapshot
+        run: |
+          echo "Capturing Pinnacle closing odds for today's pending CLV entries..."
+          curl -sf -X POST \
+            https://sports-betting-analysis.onrender.com/api/admin/clv-snapshot || true
+          echo "CLV snapshot triggered."

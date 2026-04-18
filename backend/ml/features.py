@@ -16,8 +16,14 @@ Feature vector (44 features):
   ELO (1):         elo_diff (home minus away, clamped ±600)
   Attack (3):      home_scoring_std, away_scoring_std, fixture_congestion
   Shots (4):       home_shots_avg, home_sot_avg, away_shots_avg, away_sot_avg
-                   (from FDCO CSVs during training; 0.0 at inference)
+                   (always 0.0 — zeroed in training to match inference; XGBoost
+                    assigns near-zero importance; kept for vector position stability)
   Context (2):     season_stage, away_clean_sheet_rate
+
+PLANNED (next retrain): +2 draw-propensity features (home_draw_rate, away_draw_rate)
+  _draw_rate() helper is already implemented below. Add to np.array() + FEATURE_NAMES
+  and update N_FEATURES to 46 BEFORE triggering the next retrain. Do NOT deploy the
+  vector change without an accompanying retrain — XGBoost enforces exact feature count.
 
 NOTE: Bookmaker odds are intentionally excluded from features. Including them
 causes the model to replicate market consensus instead of finding independent
@@ -160,6 +166,29 @@ def _days_since_last_match(matches: list[dict], ref_date: Optional[str]) -> floa
         return 7.0
 
 
+def _draw_rate(matches: list[dict], team_id: int, n: int = 10) -> float:
+    """
+    Fraction of last n finished matches that ended in a draw.
+
+    Draw propensity is a team-level signal: some clubs (typically mid-table,
+    defensively organised, with limited attacking quality) draw far more often
+    than their form points or goal ratios suggest. This feature gives the model
+    a direct handle on that tendency, improving calibration of draw probabilities.
+
+    Returns 0.0 if no finished matches are available (safe default — neutral).
+    """
+    recent = [m for m in matches if m.get("status") == "FINISHED"][-n:]
+    if not recent:
+        return 0.0
+    draws = 0
+    for m in recent:
+        hg = m.get("score", {}).get("fullTime", {}).get("home")
+        ag = m.get("score", {}).get("fullTime", {}).get("away")
+        if hg is not None and ag is not None and hg == ag:
+            draws += 1
+    return draws / len(recent)
+
+
 def _shots_sot_avg(matches: list[dict], team_id: int, n: int = 10) -> tuple[float, float]:
     """Rolling average shots and shots-on-target over last n finished matches."""
     recent = [m for m in matches if m.get("status") == "FINISHED"][-n:]
@@ -261,7 +290,7 @@ def build_feature_vector(
     # Total teams in the league — used to normalise standing position to [0,1].
     # Typical values: PL/PD/SA/FL1=20, BL1/DED=18, ELC=24. Default 20.
     total_teams: int = 20,
-    # Shots features — from FDCO CSVs during training, 0.0 at inference
+    # Shots features — always 0.0 (zeroed in training to match inference)
     home_shots_avg: float = 0.0,
     home_sot_avg: float = 0.0,
     away_shots_avg: float = 0.0,
@@ -328,6 +357,11 @@ def build_feature_vector(
     # --- Season stage & context ---
     s_stage = _season_stage(match_date)
 
+    # Draw propensity computed but NOT yet in vector — add after next retrain.
+    # See PLANNED note in module docstring.
+    # home_draw_rate = _draw_rate(home_matches, home_id)
+    # away_draw_rate = _draw_rate(away_matches, away_id)
+
     return np.array([
         # Form (7)
         hf5, hf10, af5, af10, form_diff, home_momentum, away_momentum,
@@ -348,7 +382,7 @@ def build_feature_vector(
         elo_diff,
         # Attack consistency + fixture load (3)
         home_scoring_std, away_scoring_std, fixture_cong,
-        # Shots (4) — from FDCO CSVs in training, 0.0 at inference
+        # Shots (4) — always 0.0, zero-variance; kept for vector position stability
         home_shots_avg, home_sot_avg, away_shots_avg, away_sot_avg,
         # Context (2)
         s_stage, away_cs_rate,
@@ -376,10 +410,11 @@ FEATURE_NAMES = [
     "elo_diff",
     # Attack consistency + fixture load (3)
     "home_scoring_std", "away_scoring_std", "fixture_congestion",
-    # Shots (4)
+    # Shots (4) — always 0.0, zero-variance
     "home_shots_avg", "home_sot_avg", "away_shots_avg", "away_sot_avg",
     # Context (2)
     "season_stage", "away_clean_sheet_rate",
+    # PLANNED: "home_draw_rate", "away_draw_rate" — add here + in np.array() before next retrain
 ]
 
 N_FEATURES = len(FEATURE_NAMES)  # 44
