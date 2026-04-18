@@ -228,16 +228,18 @@ def _star_rating(value_bets: list, best_edge: float, confidence: float) -> int:
     """
     Stars reflect betting quality (edge over market), not raw win probability.
       5★ = large edge (≥15%) or very high confidence (≥72%)
-      4★ = solid edge (≥9%) or high confidence (≥62%)
-      3★ = moderate edge (≥5%) or decent confidence (≥52%)
-      2★ = small edge (≥3%) or marginal confidence (≥42%)
-      1★ = no value detected
+      4★ = solid edge (≥10%) or high confidence (≥62%)
+      3★ = moderate edge (≥7%) or decent confidence (≥52%)
+      2★ = value detected (≥5% edge) or marginal confidence (≥42%)
+      1★ = no value detected (below 5% min_edge threshold)
+
+    Bottom threshold raised from 3% to 5% to match the min_edge filter change.
     """
     if value_bets:
         if best_edge >= 0.15: return 5
-        if best_edge >= 0.09: return 4
-        if best_edge >= 0.05: return 3
-        return 2
+        if best_edge >= 0.10: return 4
+        if best_edge >= 0.07: return 3
+        return 2  # ≥5% (already passing the value filter)
     if confidence >= 0.72: return 5
     if confidence >= 0.62: return 4
     if confidence >= 0.52: return 3
@@ -245,8 +247,12 @@ def _star_rating(value_bets: list, best_edge: float, confidence: float) -> int:
     return 1
 
 
-def _is_value(model_prob: float, fair_implied: Optional[float], min_edge: float = 0.03) -> bool:
-    """Compare model probability vs fair (devigged) implied probability."""
+def _is_value(model_prob: float, fair_implied: Optional[float], min_edge: float = 0.05) -> bool:
+    """Compare model probability vs fair (devigged) implied probability.
+
+    Threshold raised 3% → 5%: tighter filter reduces false positives and better
+    separates real edge from noise. Aligned with backtest.py's min_edge default.
+    """
     if fair_implied is None:
         return False
     return model_prob > (fair_implied + min_edge)

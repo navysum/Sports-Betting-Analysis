@@ -21,6 +21,18 @@ All win rates now carry 95% Wilson score confidence intervals. Wilson CIs
 are the standard frequentist choice for small-sample proportions (superior
 to Wald/normal approximation at win rates near 0 or 1).
 
+FIX #3 — Kelly formula alignment:
+Backtest now uses the same standard Kelly formula as predict.py:
+  kelly = fraction × (b×p − q) / b   where b=odds−1, q=1−p
+Previously used fraction × edge / (1 − 1/odds), which differs when the
+market has a margin (fair_p ≠ 1/odds after devigging).
+
+FIX #4 — Over/Under 2.5 staking:
+O/U 2.5 market is now evaluated using B365>2.5 / B365<2.5 odds from FDCO
+CSVs. Reports flat and value ROI for over25, giving a more complete picture
+of the ensemble's edge on goals markets.
+  min_edge default raised 3% → 5% — stricter filter reduces false positives.
+
 Strategies simulated:
   flat   — £1 on the predicted outcome every match
   value  — £1 only when model probability exceeds fair implied by ≥ min_edge
@@ -106,7 +118,7 @@ def _wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 def run_backtest(
     holdout_fraction: float = 0.30,   # test on most recent 30% of data
-    min_edge: float = 0.03,           # minimum probability edge for value bets
+    min_edge: float = 0.05,           # minimum probability edge for value bets (raised 3%→5%)
     kelly_fraction: float = 0.25,     # quarter Kelly
     starting_bankroll: float = 100.0,
     min_odds: float = 1.20,
@@ -179,6 +191,11 @@ def run_backtest(
     peak_bankroll = starting_bankroll
     max_drawdown  = 0.0
 
+    # Over/Under 2.5 market staking accumulators (FIX #4: added O/U staking)
+    ou_flat_pnl  = 0.0;  ou_value_pnl = 0.0
+    ou_flat_bets = ou_flat_wins = 0
+    ou_val_bets  = ou_val_wins  = 0
+
     # Multi-market Brier accumulators
     brier_result = []; brier_over25 = []; brier_btts = []; brier_over35 = []
     n_dc_fallback = 0
@@ -226,7 +243,44 @@ def run_backtest(
         brier_btts.append(  (blended_btts  - int(row["btts_label"])) ** 2)
         brier_over35.append((blended_ou35  - int(row.get("over35_label", 0))) ** 2)
 
-        # ── Staking simulation — result market only (B365 1X2 available) ────
+        # ── Over/Under 2.5 staking (FIX #4: independent of 1X2 odds availability) ──
+        # Evaluated first so `continue` in the result block below doesn't skip it.
+        ou_over_odds  = row.get("b365_over25")
+        ou_under_odds = row.get("b365_under25")
+        if (ou_over_odds and ou_under_odds
+                and min_odds <= ou_over_odds <= max_odds
+                and min_odds <= ou_under_odds <= max_odds):
+            # Pick the side the model favours
+            if blended_ou25 >= 0.5:
+                ou_pred_prob  = blended_ou25
+                ou_book_odds  = ou_over_odds
+                ou_other_odds = ou_under_odds
+                ou_won        = (row["goals_label"] == 1)  # over25 actual
+            else:
+                ou_pred_prob  = 1.0 - blended_ou25
+                ou_book_odds  = ou_under_odds
+                ou_other_odds = ou_over_odds
+                ou_won        = (row["goals_label"] == 0)  # under25 actual
+
+            ou_fair = _devig_binary(ou_book_odds, ou_other_odds)
+            ou_edge = ou_pred_prob - ou_fair if ou_fair else 0.0
+
+            # Flat: every match
+            ou_flat_bets += 1
+            if ou_won:
+                ou_flat_pnl += ou_book_odds - 1.0;  ou_flat_wins += 1
+            else:
+                ou_flat_pnl -= 1.0
+
+            # Value: only when edge ≥ min_edge
+            if ou_edge >= min_edge:
+                ou_val_bets += 1
+                if ou_won:
+                    ou_value_pnl += ou_book_odds - 1.0;  ou_val_wins += 1
+                else:
+                    ou_value_pnl -= 1.0
+
+        # ── Result market staking (B365 1X2) ─────────────────────────────────
         if not all([b365h, b365d, b365a]):
             continue
         if not (min_odds <= b365h <= max_odds and
@@ -264,33 +318,30 @@ def run_backtest(
             else:
                 value_pnl -= 1.0
 
-            # ── Fractional Kelly staking ──────────────────────────────────────
-            denominator = 1.0 - (1.0 / decimal_odds)
-            if denominator <= 0:
-                continue
+            # ── Fractional Kelly staking (FIX #3: standard Kelly matching predict.py) ──
+            # predict.py uses: kelly = (b*p - q) / b  where b=odds-1, q=1-p
+            # Old backtest used: kelly = fraction * edge / (1 - 1/odds) — differs with margin
+            b = decimal_odds - 1.0
+            if b > 0:
+                kelly = kelly_fraction * ((b * pred_prob - (1.0 - pred_prob)) / b)
+                kelly_pct   = max(0.0, min(kelly, 0.05))   # floor 0, cap 5% of bankroll
+                kelly_stake = min(bankroll * kelly_pct, bankroll)
 
-            kelly_pct   = kelly_fraction * edge / denominator
-            kelly_pct   = min(kelly_pct, 0.05)         # cap: 5% of bankroll
-            kelly_stake = bankroll * kelly_pct
-            kelly_stake = min(kelly_stake, bankroll)
+                if kelly_stake > 0 and bankroll > 0:
+                    kelly_bets += 1
+                    if won:
+                        kelly_pnl += kelly_stake * (decimal_odds - 1.0)
+                        bankroll  += kelly_stake * (decimal_odds - 1.0)
+                        kelly_wins += 1
+                    else:
+                        kelly_pnl -= kelly_stake
+                        bankroll  -= kelly_stake
 
-            if kelly_stake <= 0 or bankroll <= 0:
-                continue
-
-            kelly_bets += 1
-            if won:
-                kelly_pnl += kelly_stake * (decimal_odds - 1.0)
-                bankroll  += kelly_stake * (decimal_odds - 1.0)
-                kelly_wins += 1
-            else:
-                kelly_pnl -= kelly_stake
-                bankroll  -= kelly_stake
-
-            if bankroll > peak_bankroll:
-                peak_bankroll = bankroll
-            if peak_bankroll > 0:
-                drawdown     = (peak_bankroll - bankroll) / peak_bankroll * 100
-                max_drawdown = max(max_drawdown, drawdown)
+                    if bankroll > peak_bankroll:
+                        peak_bankroll = bankroll
+                    if peak_bankroll > 0:
+                        drawdown     = (peak_bankroll - bankroll) / peak_bankroll * 100
+                        max_drawdown = max(max_drawdown, drawdown)
 
     # ── Summary helpers ───────────────────────────────────────────────────────
     def _roi(pnl, n):
@@ -311,7 +362,7 @@ def run_backtest(
             "btts":   round(float(np.mean(brier_btts)),   4) if brier_btts   else None,
             "over35": round(float(np.mean(brier_over35)), 4) if brier_over35 else None,
         },
-        # ── Staking results ───────────────────────────────────────────────────
+        # ── Result market staking results ─────────────────────────────────────
         "flat": {
             "bets":          flat_bets,
             "wins":          flat_wins,
@@ -340,6 +391,24 @@ def run_backtest(
             "starting_bankroll": starting_bankroll,
             "max_drawdown_pct":  round(min(max_drawdown, 100.0), 1),
             "fraction":          kelly_fraction,
+        },
+        # ── Over/Under 2.5 staking results (FIX #4) ──────────────────────────
+        "over25_flat": {
+            "bets":     ou_flat_bets,
+            "wins":     ou_flat_wins,
+            "win_rate": _wr(ou_flat_wins, ou_flat_bets),
+            "win_rate_ci95": _wilson_ci(ou_flat_wins, ou_flat_bets),
+            "pnl":      round(ou_flat_pnl, 2),
+            "roi":      _roi(ou_flat_pnl, ou_flat_bets),
+        },
+        "over25_value": {
+            "bets":         ou_val_bets,
+            "wins":         ou_val_wins,
+            "win_rate":     _wr(ou_val_wins, ou_val_bets),
+            "win_rate_ci95": _wilson_ci(ou_val_wins, ou_val_bets),
+            "pnl":          round(ou_value_pnl, 2),
+            "roi":          _roi(ou_value_pnl, ou_val_bets),
+            "min_edge_pct": round(min_edge * 100, 1),
         },
     }
 
