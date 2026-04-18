@@ -46,7 +46,7 @@ def optimise():
     from ml.dixon_coles import load_dc_model
 
     print("Loading FDCO training data…")
-    X, y_result, y_goals, y_btts, y_over35, odds_rows = build_fdco_training_data()
+    X, y_result, y_goals, y_btts, y_over35, odds_rows, _ = build_fdco_training_data()
     if len(X) == 0:
         print("No training data found. Run scraper first.")
         return
@@ -95,7 +95,8 @@ def optimise():
     dc_over25, dc_btts, dc_over35 = [], [], []
 
     for row in rows_hold:
-        info = dc_model.match_probs(row["home"], row["away"])
+        # FIX #8: pass league so per-league rho is used during blend evaluation
+        info = dc_model.match_probs(row["home"], row["away"], league=row.get("league", ""))
         if info:
             dc_home.append(info["home"])
             dc_draw.append(info["draw"])
@@ -113,7 +114,9 @@ def optimise():
     dc_over35 = np.array(dc_over35)
 
     best = {}
-    weights = np.arange(0.0, 1.05, 0.05)
+    # FIX #24: 0.01 step grid (was 0.05) — optimal weight could be 0.27, which
+    # a 0.05 grid rounded to 0.25 or 0.30, costing measurable Brier score.
+    weights = np.arange(0.0, 1.01, 0.01)
 
     markets = [
         ("result", xgb_result, dc_result, y_res_hold, "multiclass"),

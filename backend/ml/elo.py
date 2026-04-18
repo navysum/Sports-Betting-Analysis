@@ -11,6 +11,14 @@ Why ELO?
   - Home advantage baked in (+100 points effective rating for home team)
   - Enables cross-league strength comparison for European fixtures
 
+Changes (FIX #7):
+  - K_FACTOR reduced from 32 (chess) to 20 (appropriate for football).
+    K=32 caused ratings to oscillate too aggressively after each result.
+  - Added apply_season_reversion(): at the start of each new season, each
+    team's rating is pulled 20% toward the league mean to account for summer
+    squad changes. A team that won the league but lost their key players
+    should not carry an inflated rating into the new season.
+
 Usage:
     from ml.elo import EloSystem, load_elo_ratings, save_elo_ratings
     elo = load_elo_ratings()
@@ -24,10 +32,11 @@ from typing import Optional
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 ELO_PATH = os.path.join(_DATA_DIR, "elo_ratings.json")
 
-DEFAULT_ELO = 1500.0
-K_FACTOR = 32.0          # Sensitivity to each result
-HOME_ADVANTAGE = 100.0   # Points added to home team's effective rating
-MAX_DIFF = 600.0         # Clamp on elo_diff feature for normalisation
+DEFAULT_ELO    = 1500.0
+K_FACTOR       = 20.0          # FIX #7: was 32 (chess); 20 is appropriate for football
+HOME_ADVANTAGE = 100.0         # Points added to home team's effective rating
+MAX_DIFF       = 600.0         # Clamp on elo_diff feature for normalisation
+SEASON_REVERSION = 0.20        # FIX #7: pull ratings 20% toward league mean each summer
 
 
 class EloSystem:
@@ -75,6 +84,30 @@ class EloSystem:
         k = K_FACTOR * gd_mult
         self._ratings[home_team] = self.get_rating(home_team) + k * (s_home - e_home)
         self._ratings[away_team] = self.get_rating(away_team) + k * (s_away - e_away)
+
+    def apply_season_reversion(self, league_teams: Optional[list[str]] = None) -> None:
+        """
+        FIX #7: Pull each team's ELO rating toward the league mean at the start
+        of a new season, accounting for squad changes during the summer window.
+
+        Without reversion, a league-winning team carries an inflated rating even
+        after losing their star players. SEASON_REVERSION=0.20 means 20% of the
+        gap to the league mean is closed — consistent with standard football ELO
+        systems (e.g., Club Football World Ranking uses 1/3 reversion).
+
+        league_teams: if supplied, only revert those teams and compute the mean
+                      from them.  If None, all rated teams are reverted.
+        """
+        teams = league_teams or list(self._ratings.keys())
+        if not teams:
+            return
+        rated = [t for t in teams if t in self._ratings]
+        if not rated:
+            return
+        league_mean = sum(self._ratings[t] for t in rated) / len(rated)
+        for team in rated:
+            gap = league_mean - self._ratings[team]
+            self._ratings[team] += SEASON_REVERSION * gap
 
     def to_dict(self) -> dict:
         return dict(self._ratings)
