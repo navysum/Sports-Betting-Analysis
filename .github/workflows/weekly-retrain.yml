@@ -5,10 +5,10 @@ name: Weekly Model Retrain
 # → merge → train XGBoost + calibrators (70/15/15 split) → Dixon-Coles
 # → optimize blend weights on clean 85–100% holdout → reload models.
 #
-# Render free-tier spins down after 15 min idle. The first step wakes it,
-# then the retrain is triggered. The retrain itself runs asynchronously
-# on Render — this job just starts it and waits for a moment to confirm
-# it was accepted.
+# IMPORTANT: Render free-tier spins down after 15 min with no inbound HTTP
+# traffic. The retrain takes ~25–35 min, so without keep-alive pings it gets
+# killed mid-training. This workflow polls the retrain status every 5 minutes
+# (up to 50 min) to keep the server alive until training completes.
 
 on:
   schedule:
@@ -18,7 +18,7 @@ on:
 jobs:
   retrain:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60    # allow up to 60 min for training + keep-alive loop
 
     steps:
       - name: Wake backend (cold-start ping)
@@ -36,5 +36,22 @@ jobs:
             https://sports-betting-analysis.onrender.com/api/admin/retrain \
             2>&1) || true
           echo "Response: $response"
-          echo "Retrain triggered. It runs asynchronously on Render (~20–40 min)."
-          echo "Check status at: https://sports-betting-analysis.onrender.com/api/admin/retrain/status"
+
+      - name: Keep server alive + wait for completion
+        run: |
+          echo "Polling retrain status every 5 min (keeps Render server alive)..."
+          for i in $(seq 1 10); do
+            sleep 300
+            status=$(curl -sf \
+              "https://sports-betting-analysis.onrender.com/api/admin/retrain/status" \
+              2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('status','unknown'))" 2>/dev/null || echo "unreachable")
+            echo "  Poll $i/10 — status: $status"
+            if [ "$status" = "done" ]; then
+              echo "Retrain completed successfully."
+              exit 0
+            elif [ "$status" = "failed" ]; then
+              echo "Retrain FAILED. Check Render logs."
+              exit 1
+            fi
+          done
+          echo "Timeout after 50 min — retrain may still be running. Check manually."

@@ -20,7 +20,7 @@ jobs:
   cache-refresh:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && startsWith(github.event.schedule, '0 1'))
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
 
     steps:
       - name: Wake backend (cold-start ping)
@@ -33,8 +33,20 @@ jobs:
         run: |
           echo "Triggering data cache refresh..."
           curl -sf -X POST \
-            https://sports-betting-analysis.onrender.com/api/admin/refresh-cache
-          echo "Cache refresh triggered successfully."
+            https://sports-betting-analysis.onrender.com/api/admin/refresh-cache || true
+          echo "Cache refresh triggered."
+
+      - name: Keep server alive during cache fetch
+        run: |
+          # Cache refresh fetches standings + matches for 9 leagues + team histories.
+          # Rate-limited at 10 req/min → can take 15–20 min. Poll to keep Render alive.
+          for i in $(seq 1 4); do
+            sleep 270
+            curl -sf https://sports-betting-analysis.onrender.com/api/admin/refresh-cache/status \
+              > /dev/null 2>&1 || true
+            echo "  Keep-alive ping $i/4 sent"
+          done
+          echo "Cache refresh keep-alive complete."
 
   clv-snapshot:
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && startsWith(github.event.schedule, '30 11'))
