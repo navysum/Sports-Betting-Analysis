@@ -13,6 +13,7 @@ from app.api.matches import router as matches_router
 from app.api.predictions import router as predictions_router, preload_today_predictions
 from app.api.admin import router as admin_router
 from ml.predict import load_model
+from app.services.football_api import build_team_cache
 
 # Initialize the background scheduler to run periodic tasks
 _scheduler = AsyncIOScheduler(timezone="UTC")
@@ -31,7 +32,10 @@ async def lifespan(app: FastAPI):
     # 2. Load the Machine Learning model into memory
     load_model()
 
-    # 3. Kick off today's predictions immediately so they're ready when users arrive
+    # 3. Build team search cache so /search works immediately after startup
+    asyncio.create_task(build_team_cache())
+
+    # 4. Kick off today's predictions immediately so they're ready when users arrive
     # This runs in the background so it doesn't block the app from starting
     asyncio.create_task(preload_today_predictions())
 

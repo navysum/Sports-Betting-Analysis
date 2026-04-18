@@ -74,7 +74,7 @@ async def get_today_matches(competition_code: str = "PL") -> list[dict]:
     # football-data.org uses TIMED for confirmed fixtures and SCHEDULED for date-only ones
     data = await _get(
         f"{BASE_URL}/competitions/{competition_code}/matches",
-        {"status": "SCHEDULED,TIMED", "dateFrom": today, "dateTo": today},
+        {"status": "SCHEDULED,TIMED,IN_PLAY,PAUSED,FINISHED", "dateFrom": today, "dateTo": today},
     )
     return data.get("matches", [])
 
