@@ -89,10 +89,13 @@ async def get_pinnacle_odds(competition_code: str) -> list[dict]:
     if cached and time.time() - cached.get("ts", 0) < CACHE_TTL:
         return cached["data"]
 
+    # FIX #5: fetch both h2h and totals markets so over2.5 odds are available
+    # for CLV tracking. Previously only h2h was fetched, making over25/btts/over35
+    # CLV entries log None for implied probability — rendering them useless.
     params = {
         "apiKey":     settings.odds_api_key,
         "regions":    "eu",
-        "markets":    "h2h",
+        "markets":    "h2h,totals",
         "oddsFormat": "decimal",
         "bookmakers": "pinnacle",
     }
@@ -222,40 +225,63 @@ def _extract_best_odds(
 ) -> Optional[dict]:
     """
     Take the best (highest) odds across all bookmakers for each outcome.
-    Uses team names to correctly assign home/draw/away — The Odds API labels
-    outcomes by team name, not position, so position-based assignment was wrong.
+
+    Extracts:
+      h2h market   → home / draw / away
+      totals market → over25 / under25 (over/under 2.5 goals)
+
+    FIX #5: previously only h2h was parsed, so over25 was always None in the
+    returned dict. CLV tracking for goals markets was therefore broken — every
+    over25/over35 CLV entry logged None as the implied probability, making the
+    stats meaningless. Now Pinnacle's totals market (fetched in the same API
+    request) is also parsed and over25 is included in the result.
     """
-    best = {"home": None, "draw": None, "away": None}
+    best = {"home": None, "draw": None, "away": None, "over25": None, "under25": None}
 
     for bm in bookmakers:
         for market in bm.get("markets", []):
-            if market.get("key") != "h2h":
-                continue
+            mkey = market.get("key", "")
             outcomes = market.get("outcomes", [])
-            if len(outcomes) < 2:
+            if not outcomes:
                 continue
 
-            for outcome in outcomes:
-                name = outcome.get("name", "")
-                price = outcome.get("price")
-                if price is None:
-                    continue
+            if mkey == "h2h":
+                for outcome in outcomes:
+                    name = outcome.get("name", "")
+                    price = outcome.get("price")
+                    if price is None:
+                        continue
+                    name_lower = name.lower()
+                    if name_lower == "draw":
+                        key = "draw"
+                    elif home_team and _fuzzy_match(name_lower, home_team.lower()):
+                        key = "home"
+                    elif away_team and _fuzzy_match(name_lower, away_team.lower()):
+                        key = "away"
+                    else:
+                        continue
+                    if best[key] is None or price > best[key]:
+                        best[key] = price
 
-                # Match by name: "Draw" is literal, teams matched by name
-                name_lower = name.lower()
-                if name_lower == "draw":
-                    key = "draw"
-                elif home_team and _fuzzy_match(name_lower, home_team.lower()):
-                    key = "home"
-                elif away_team and _fuzzy_match(name_lower, away_team.lower()):
-                    key = "away"
-                else:
-                    continue  # Can't reliably identify this outcome
+            elif mkey == "totals":
+                # The Odds API returns totals as {"name": "Over", "point": 2.5, "price": 1.85}
+                for outcome in outcomes:
+                    name  = outcome.get("name", "").lower()
+                    point = outcome.get("point")
+                    price = outcome.get("price")
+                    if price is None or point is None:
+                        continue
+                    # Only extract the 2.5 line
+                    if abs(float(point) - 2.5) < 0.01:
+                        if name == "over":
+                            if best["over25"] is None or price > best["over25"]:
+                                best["over25"] = price
+                        elif name == "under":
+                            if best["under25"] is None or price > best["under25"]:
+                                best["under25"] = price
 
-                if best[key] is None or price > best[key]:
-                    best[key] = price
-
-    if all(v is not None for v in best.values()):
+    # Return only if we have at minimum the 1X2 prices
+    if all(best[k] is not None for k in ("home", "draw", "away")):
         return best
     return None
 
