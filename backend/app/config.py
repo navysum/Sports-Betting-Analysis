@@ -12,8 +12,13 @@ class Settings(BaseSettings):
     # --- Football API Keys ---
     # These are used to fetch live match data and betting odds from external services.
     football_data_api_key: str = ""
-    api_football_key: str = ""       # RapidAPI free tier — 100 req/day
+    api_football_key: str = ""       # RapidAPI free tier — 100 req/day (legacy, see rapidapi_key)
     odds_api_key: str = ""           # the-odds-api.com — 500 req/month free
+
+    # --- RapidAPI (single key, 3 subscriptions) ---
+    # Covers: Sofascore (xG), Free API Live Football Data, SportAPI
+    # Set RAPIDAPI_KEY in .env or Render environment variables.
+    rapidapi_key: str = ""
 
     # --- Database Configuration ---
     # The URL for the SQLite database. 

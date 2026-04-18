@@ -85,13 +85,18 @@ def _cache_set(key: str, data: list):
 
 
 async def _fetch_injuries(league_id: int, season: int, date_str: str) -> list[dict]:
-    """Raw API call. Returns list of injury objects from API-Football."""
-    if not settings.api_football_key:
+    """Raw API call. Returns list of injury objects from API-Football.
+
+    Uses settings.api_football_key if set; falls back to settings.rapidapi_key
+    so the single RapidAPI key from the .env is enough for everything.
+    """
+    key = settings.api_football_key or settings.rapidapi_key
+    if not key:
         return []
 
     params = {"league": league_id, "season": season, "date": date_str}
     headers = {
-        "X-RapidAPI-Key":  settings.api_football_key,
+        "X-RapidAPI-Key":  key,
         "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com",
     }
 
@@ -116,7 +121,8 @@ async def get_all_match_injuries(
     Returns {team_name: [{player, type, reason}, ...], ...}
     """
     league_id = LEAGUE_IDS.get(competition_code)
-    if not league_id or not settings.api_football_key:
+    key = settings.api_football_key or settings.rapidapi_key
+    if not league_id or not key:
         return {}
 
     date_str = match_date[:10] if match_date else datetime.utcnow().strftime("%Y-%m-%d")

@@ -22,6 +22,7 @@ from app.services.football_api import (
     SUPPORTED_COMPETITIONS,
 )
 from app.services.scraper import fetch_understat_team_xg
+from app.services.rapidapi_football import get_sofascore_team_xg
 from app.services.evaluator import append_prediction, build_ledger_entry
 from app.services.odds_api import find_match_odds, find_pinnacle_odds
 from app.services.injury_service import get_team_injuries, injury_adjustment
@@ -154,19 +155,29 @@ async def predict_match(
         home_matches,
         away_matches,
         standings_table,
-        home_xg_data,
-        away_xg_data,
+        home_xg_sofascore,
+        away_xg_sofascore,
+        home_xg_understat,
+        away_xg_understat,
         home_injuries,
         away_injuries,
     ) = await asyncio.gather(
         _safe(get_team_matches(home_team_id, limit=25)),
         _safe(get_team_matches(away_team_id, limit=25)),
         _safe(get_standings(competition_code)),
+        # Sofascore: primary xG source (real API, no HTML scraping)
+        _safe(get_sofascore_team_xg(home_team_name, competition_code), {}),
+        _safe(get_sofascore_team_xg(away_team_name, competition_code), {}),
+        # Understat: fallback xG source (HTML scraper, slower / less reliable)
         _safe(fetch_understat_team_xg(home_team_name, competition_code), {}),
         _safe(fetch_understat_team_xg(away_team_name, competition_code), {}),
         _safe(get_team_injuries(home_team_name, competition_code, date_str), []),
         _safe(get_team_injuries(away_team_name, competition_code, date_str), []),
     )
+    # Prefer Sofascore xG; fall back to Understat if Sofascore returned nothing
+    home_xg_data = home_xg_sofascore or home_xg_understat or {}
+    away_xg_data = away_xg_sofascore or away_xg_understat or {}
+
     home_fbref: dict = {}
     away_fbref: dict = {}
 
