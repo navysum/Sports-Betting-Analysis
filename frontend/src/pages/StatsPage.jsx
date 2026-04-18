@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { getAccuracy, triggerRetrain, getRetrainStatus } from "../services/api";
+import { getAccuracy, triggerRetrain, getRetrainStatus, getBacktest } from "../services/api";
 
 function pct(v) { return v != null ? `${Math.round(v * 100)}%` : "—"; }
 
@@ -253,6 +253,116 @@ function RetrainPanel() {
   );
 }
 
+function roi(v) {
+  if (v == null) return "—";
+  const s = v >= 0 ? "+" : "";
+  return `${s}${v.toFixed(1)}%`;
+}
+
+function BacktestPanel() {
+  const [bt, setBt] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    setLoading(true);
+    getBacktest()
+      .then(r => setBt(r.data))
+      .catch(e => setError(e.response?.data?.detail || e.message))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div className="mb-8">
+      <div className="flex items-baseline gap-2 mb-3">
+        <h2 className="text-sm font-medium text-white">Backtest (Historical)</h2>
+        {bt && (
+          <span className="text-xs text-zinc-600">
+            {bt.total_matches?.toLocaleString()} matches · last {bt.holdout_pct}%
+          </span>
+        )}
+      </div>
+
+      {loading && <p className="text-xs text-zinc-600 py-4 text-center">Running backtest…</p>}
+      {error && <p className="text-xs text-red-500">{error}</p>}
+
+      {bt && !bt.error && (
+        <div className="space-y-3">
+          {/* Brier calibration */}
+          <div className="border border-zinc-800 rounded-md overflow-hidden">
+            <div className="px-4 py-2 border-b border-zinc-800/60">
+              <span className="text-xs font-medium text-zinc-400">Calibration (Brier score, lower = better)</span>
+            </div>
+            <div className="px-4">
+              <StatRow label="Result" value={bt.brier?.result?.toFixed(4) ?? "—"} sub="random ≈ 0.67" />
+              <StatRow label="Over 2.5" value={bt.brier?.over25?.toFixed(4) ?? "—"} sub="random ≈ 0.25" />
+              <StatRow label="BTTS" value={bt.brier?.btts?.toFixed(4) ?? "—"} sub="random ≈ 0.25" />
+              <StatRow label="Over 3.5" value={bt.brier?.over35?.toFixed(4) ?? "—"} sub="random ≈ 0.20" />
+            </div>
+          </div>
+
+          {/* Result market staking */}
+          <div className="border border-zinc-800 rounded-md overflow-hidden">
+            <div className="px-4 py-2 border-b border-zinc-800/60">
+              <span className="text-xs font-medium text-zinc-400">Result market staking (£1/bet)</span>
+            </div>
+            <div className="px-4">
+              <StatRow
+                label="Flat — every match"
+                value={<span className={bt.flat?.roi >= 0 ? "text-green-400" : "text-red-400"}>{roi(bt.flat?.roi)}</span>}
+                sub={`${bt.flat?.bets?.toLocaleString() ?? "—"} bets`}
+              />
+              <StatRow
+                label={`Value — edge ≥ ${bt.value?.min_edge_pct ?? 5}%`}
+                value={<span className={bt.value?.roi >= 0 ? "text-green-400" : "text-red-400"}>{roi(bt.value?.roi)}</span>}
+                sub={`${bt.value?.bets?.toLocaleString() ?? "—"} bets · ${bt.value?.win_rate?.toFixed(1) ?? "—"}% WR`}
+              />
+              <StatRow
+                label="Kelly — fractional (0.25×)"
+                value={<span className={bt.kelly?.pnl >= 0 ? "text-green-400" : "text-red-400"}>
+                  {bt.kelly?.final_bankroll != null ? `£${bt.kelly.final_bankroll.toFixed(0)}` : "—"}
+                </span>}
+                sub={`from £${bt.kelly?.starting_bankroll ?? 100} · max DD ${bt.kelly?.max_drawdown_pct?.toFixed(1) ?? "—"}%`}
+              />
+            </div>
+          </div>
+
+          {/* O/U 2.5 staking */}
+          {bt.over25_flat && (
+            <div className="border border-zinc-800 rounded-md overflow-hidden">
+              <div className="px-4 py-2 border-b border-zinc-800/60">
+                <span className="text-xs font-medium text-zinc-400">Over/Under 2.5 staking (£1/bet)</span>
+              </div>
+              <div className="px-4">
+                <StatRow
+                  label="Flat — every match"
+                  value={<span className={bt.over25_flat?.roi >= 0 ? "text-green-400" : "text-red-400"}>{roi(bt.over25_flat?.roi)}</span>}
+                  sub={`${bt.over25_flat?.bets?.toLocaleString() ?? "—"} bets`}
+                />
+                <StatRow
+                  label={`Value — edge ≥ ${bt.over25_value?.min_edge_pct ?? 5}%`}
+                  value={<span className={bt.over25_value?.roi >= 0 ? "text-green-400" : "text-red-400"}>{roi(bt.over25_value?.roi)}</span>}
+                  sub={`${bt.over25_value?.bets?.toLocaleString() ?? "—"} bets · ${bt.over25_value?.win_rate?.toFixed(1) ?? "—"}% WR`}
+                />
+              </div>
+            </div>
+          )}
+
+          {bt._cached_at && (
+            <p className="text-[10px] text-zinc-700 text-right">
+              Cached {new Date(bt._cached_at).toLocaleTimeString("en-GB")}
+            </p>
+          )}
+        </div>
+      )}
+
+      {bt?.error && (
+        <p className="text-xs text-red-400 font-mono">{bt.error}</p>
+      )}
+    </div>
+  );
+}
+
 export default function StatsPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -274,6 +384,7 @@ export default function StatsPage() {
 
       <div className="px-4">
         <RetrainPanel />
+        <BacktestPanel />
 
         {loading && <p className="text-xs text-zinc-600 py-8 text-center">Loading…</p>}
         {error && <p className="text-xs text-red-500">{error}</p>}

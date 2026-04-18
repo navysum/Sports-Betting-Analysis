@@ -2,6 +2,7 @@
 Admin endpoints: model retraining, status, last training summary, and data cache refresh.
 """
 import asyncio
+import time
 import traceback
 from datetime import datetime, timezone
 from fastapi import APIRouter
@@ -324,3 +325,49 @@ async def clv_stats(days: int = 30):
     """Return CLV performance summary for the last N days."""
     from app.services.clv_tracker import get_clv_stats
     return get_clv_stats(days=days)
+
+
+# ── Backtest ───────────────────────────────────────────────────────────────────
+
+# Cache backtest result for 6 hours — it's CPU-intensive (predicts on ~11k rows)
+_backtest_cache: dict = {}
+_backtest_cache_ts: float = 0.0
+_BACKTEST_TTL: float = 6 * 3600
+
+
+@router.get("/backtest")
+async def get_backtest(min_edge: float = 0.05, holdout: float = 0.30):
+    """
+    Run (or return cached) backtest results on FDCO historical data.
+
+    Uses the last `holdout` fraction of chronologically sorted data as the
+    test set. Evaluates the full production pipeline: calibrated XGBoost +
+    Dixon-Coles blend + devigged odds — exactly what the live system uses.
+
+    Results are cached for 6 hours to avoid hammering CPU on every page load.
+    Trigger a fresh run by changing min_edge or holdout parameters.
+
+    Returns staking ROI for result market (flat/value/kelly) and O/U 2.5
+    (flat/value), plus Brier calibration scores for all four markets.
+    """
+    global _backtest_cache, _backtest_cache_ts
+
+    cache_key = f"{min_edge}_{holdout}"
+    if (cache_key == _backtest_cache.get("_key")
+            and time.time() - _backtest_cache_ts < _BACKTEST_TTL):
+        return _backtest_cache
+
+    try:
+        from ml.backtest import run_backtest
+        # Run synchronously — takes ~5–15 s depending on data size
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: run_backtest(holdout_fraction=holdout, min_edge=min_edge),
+        )
+        result["_key"] = cache_key
+        result["_cached_at"] = datetime.now(timezone.utc).isoformat()
+        _backtest_cache = result
+        _backtest_cache_ts = time.time()
+        return result
+    except Exception as e:
+        return {"error": str(e)}

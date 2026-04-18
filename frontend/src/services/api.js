@@ -66,3 +66,7 @@ export const getAccuracy = () => rootApi.get("/accuracy");
 // ── Admin / Retrain ───────────────────────────────────────────────────────────
 export const triggerRetrain    = () => api.post("/admin/retrain");
 export const getRetrainStatus  = () => api.get("/admin/retrain/status");
+export const getBacktest       = (minEdge = 0.05) =>
+  api.get("/admin/backtest", { params: { min_edge: minEdge } });
+export const getCLVStats       = (days = 30) =>
+  api.get("/admin/clv-stats", { params: { days } });
