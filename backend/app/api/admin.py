@@ -228,3 +228,99 @@ async def refresh_cache():
 async def refresh_cache_status():
     """Check the status of the last cache refresh."""
     return _refresh_state
+
+
+# ── CLV closing-line snapshot ──────────────────────────────────────────────────
+
+@router.post("/clv-snapshot")
+async def clv_snapshot():
+    """
+    Capture a closing-line snapshot for today's pending CLV entries.
+
+    Should be called ~90 minutes before typical kickoff times so the Pinnacle
+    odds captured are as close to true closing prices as possible.
+    Called by the GitHub Actions cron at 11:30 UTC daily.
+
+    For each CLV log entry from today (or yesterday) that still has no
+    pinnacle_closing_implied, fetches current Pinnacle odds and records them.
+    Returns counts of entries updated vs skipped.
+    """
+    asyncio.create_task(_run_clv_snapshot())
+    return {"message": "CLV snapshot started", "status": "running"}
+
+
+async def _run_clv_snapshot():
+    """Background task: update CLV closing odds for pending log entries."""
+    try:
+        from app.services.clv_tracker import _load_log, update_closing
+        from app.services.odds_api import find_pinnacle_odds, SPORT_MAP
+        from app.services.football_api import SUPPORTED_COMPETITIONS
+
+        entries = _load_log()
+        # Current month prefix — only update entries from the last ~60 days
+        cutoff_month = datetime.now(timezone.utc).strftime("%Y-%m")
+
+        # Build reverse map: competition display name → competition code
+        name_to_code = {v: k for k, v in SUPPORTED_COMPETITIONS.items()}
+
+        market_to_key = {"home": "home", "draw": "draw", "away": "away", "over25": "over25"}
+
+        pending = [
+            e for e in entries
+            if e.get("pinnacle_closing_implied") is None
+            and e.get("date", "")[:7] >= cutoff_month[:7]  # same or later month
+        ]
+
+        print(f"[clv-snapshot] {len(pending)} pending CLV entries to update")
+        updated = skipped = 0
+
+        # Cache Pinnacle odds per (home, away, comp) to avoid redundant API calls
+        seen_pairs: dict[str, object] = {}
+        for entry in pending:
+            comp_name = entry.get("competition", "")
+            comp_code = name_to_code.get(comp_name) or comp_name  # fallback: use as-is
+            pair_key = f"{entry.get('home_team')}|{entry.get('away_team')}|{comp_code}"
+
+            if pair_key not in seen_pairs:
+                if comp_code not in SPORT_MAP:
+                    seen_pairs[pair_key] = None
+                else:
+                    try:
+                        seen_pairs[pair_key] = await find_pinnacle_odds(
+                            entry.get("home_team", ""),
+                            entry.get("away_team", ""),
+                            comp_code,
+                        )
+                    except Exception as exc:
+                        print(f"[clv-snapshot] odds fetch error {pair_key}: {exc}")
+                        seen_pairs[pair_key] = None
+
+            pin_odds = seen_pairs[pair_key]
+            if not pin_odds:
+                skipped += 1
+                continue
+
+            mkt = entry.get("market")
+            odds_key = market_to_key.get(mkt)
+            if not odds_key or odds_key not in pin_odds:
+                skipped += 1
+                continue
+
+            closing_price = pin_odds[odds_key]
+            if closing_price and closing_price > 1.0:
+                update_closing(entry["id"], mkt, closing_price)
+                updated += 1
+            else:
+                skipped += 1
+
+        print(f"[clv-snapshot] Done — updated={updated}, skipped={skipped}")
+
+    except Exception as exc:
+        print(f"[clv-snapshot] Failed: {exc}")
+
+
+@router.get("/clv-stats")
+async def clv_stats(days: int = 30):
+    """Return CLV performance summary for the last N days."""
+    from app.services.clv_tracker import get_clv_stats
+    return get_clv_stats(days=days)

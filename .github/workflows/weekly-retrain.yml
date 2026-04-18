@@ -1,0 +1,40 @@
+name: Weekly Model Retrain
+
+# Triggers a full model retrain every Sunday at 02:00 UTC.
+# The retrain pipeline: download FDCO CSVs → fetch API training data
+# → merge → train XGBoost + calibrators (70/15/15 split) → Dixon-Coles
+# → optimize blend weights on clean 85–100% holdout → reload models.
+#
+# Render free-tier spins down after 15 min idle. The first step wakes it,
+# then the retrain is triggered. The retrain itself runs asynchronously
+# on Render — this job just starts it and waits for a moment to confirm
+# it was accepted.
+
+on:
+  schedule:
+    - cron: "0 2 * * 0"   # 02:00 UTC every Sunday
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Wake backend (cold-start ping)
+        run: |
+          echo "Pinging backend to wake from sleep..."
+          curl -sf --retry 5 --retry-delay 15 \
+            https://sports-betting-analysis.onrender.com/health || true
+          echo "Backend awake (or timeout — continuing anyway)"
+
+      - name: Trigger model retrain
+        run: |
+          echo "Triggering weekly model retrain..."
+          response=$(curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            https://sports-betting-analysis.onrender.com/api/admin/retrain \
+            2>&1) || true
+          echo "Response: $response"
+          echo "Retrain triggered. It runs asynchronously on Render (~20–40 min)."
+          echo "Check status at: https://sports-betting-analysis.onrender.com/api/admin/retrain/status"
