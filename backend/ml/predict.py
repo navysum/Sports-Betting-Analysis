@@ -358,6 +358,7 @@ def predict(
     # Derive lambda from the blended over25 probability instead:
     #   lambda_total ≈ -1.5 × ln(1 − P(over25))   [good for P ∈ 0.4–0.85]
     # Split 58.5 / 41.5 home/away to reflect typical home-advantage goal share.
+    used_xg_fallback = xg_home is None
     if xg_home is None:
         import math as _math
         _lam = max(0.5, -1.5 * _math.log(max(1.0 - over25_prob, 0.01)))
@@ -371,6 +372,17 @@ def predict(
     over25_fair = _devig_binary(odds.get("over25"), odds.get("under25"))
     over35_fair = _devig_binary(odds.get("over35"), odds.get("under35"))
     btts_fair   = _devig_binary(odds.get("btts"),   odds.get("btts_no"))
+
+    # Exact devig available when all three 1X2 prices are present
+    used_approx_devig = not all(o and o > 1.0 for o in [
+        odds.get("home"), odds.get("draw"), odds.get("away")
+    ])
+    # League model used if a league-specific file exists on disk
+    league_model_active = bool(league_code and os.path.exists(
+        RESULT_MODEL_PATH.replace(".joblib", f"_{league_code}.joblib")
+    ))
+    used_global_model = not league_model_active
+    used_dc_fallback  = dc_info is None
 
     # ── Value bets (FIX #14: compare vs fair implied, not raw implied) ────────
     value_bets   = []
@@ -408,6 +420,17 @@ def predict(
     confidence = round(max(home_p, draw_p, away_p), 4)
     stars = _star_rating(value_bets, best_edge, confidence)
 
+    # ── Bet eligibility gate (per File 1 Section 4.4) ─────────────────────────
+    # A bet is eligible only when data quality is good and edge is real.
+    # This separates "show prediction" from "show as bet recommendation".
+    bet_eligible = all([
+        not used_approx_devig,      # exact two-sided devig available
+        not used_xg_fallback,       # real xG used (not derived from over25 proxy)
+        not used_dc_fallback,       # DC match found for this fixture
+        not used_global_model,      # league-specific model active
+        best_edge >= 0.05,          # minimum 5% edge over fair odds
+    ])
+
     return {
         "home_win_prob":     round(home_p, 4),
         "draw_prob":         round(draw_p, 4),
@@ -424,6 +447,7 @@ def predict(
         "value_bets":        value_bets,
         "kelly_stakes":      kelly_stakes,
         "best_edge":         round(best_edge, 4),
+        "edges":             {k: round(v, 4) for k, v in edges.items()},
         "calibrated":        _result_cal is not None,
         "dc_available":      dc_info is not None,
         "correct_scores":    correct_scores,
@@ -434,10 +458,16 @@ def predict(
         "xg_home":           xg_home,
         "xg_away":           xg_away,
         "bookmaker_odds":    dict(odds) if odds else None,
-        "league_model_used": bool(league_code and os.path.exists(
-            RESULT_MODEL_PATH.replace(".joblib", f"_{league_code}.joblib")
-        )),
+        "league_model_used": league_model_active,
         "league_cal_used": bool(league_code and os.path.exists(
             RESULT_CAL_PATH.replace(".joblib", f"_{league_code}.joblib")
         )),
+        # Fallback flags — logged for quality monitoring
+        "fallback_flags": {
+            "used_xg_fallback":   used_xg_fallback,
+            "used_dc_fallback":   used_dc_fallback,
+            "used_global_model":  used_global_model,
+            "used_approx_devig":  used_approx_devig,
+        },
+        "bet_eligible": bet_eligible,
     }

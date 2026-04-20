@@ -4,12 +4,14 @@ import { searchTeam } from "../services/api";
 
 const NAV = [
   { to: "/",               label: "Today" },
+  { to: "/best-bets",      label: "Best Bets" },
   { to: "/predictions",    label: "Picks" },
   { to: "/distributions",  label: "Charts" },
   { to: "/montecarlo",     label: "Sim" },
   { to: "/results",        label: "Results" },
   { to: "/standings",      label: "Table" },
   { to: "/stats",          label: "Stats" },
+  { to: "/analytics",      label: "Analytics" },
 ];
 
 function useTheme() {
