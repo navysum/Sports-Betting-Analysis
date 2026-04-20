@@ -295,6 +295,42 @@ async def predict_match(
     result["away_fbref"]   = away_fbref or {}
     result["pinnacle_odds"] = pinnacle_odds
 
+    # ── AI Decision Layer ─────────────────────────────────────────────────────
+    # Layer 2: interpret the quant output and produce a structured recommendation.
+    # Runs synchronously (CPU-only, no I/O) so no await needed.
+    try:
+        from ai_layer.recommendation_service import analyze_all_markets
+        from app.services.clv_tracker import get_clv_stats as _get_clv
+
+        _clv_stats = _get_clv(days=90)
+        _match_info = {
+            "home_team":       home_team_name,
+            "away_team":       away_team_name,
+            "league":          _competition_name(competition_code),
+            "competition_code": competition_code,
+            "match_date":      date_str,
+        }
+        ai_analysis = analyze_all_markets(
+            prediction=result,
+            match_info=_match_info,
+            clv_stats_by_market=_clv_stats.get("by_market", {}),
+        )
+        result["ai_analysis"] = ai_analysis
+
+        # Log decisions for learning engine
+        if home_team_name and away_team_name:
+            from ai_layer.learning_engine import log_decisions_batch
+            _mid = str(api_match_id) if api_match_id else _make_match_id(
+                competition_code, date_str, home_team_name, away_team_name
+            )
+            log_decisions_batch(
+                match_id=_mid,
+                match_info=_match_info,
+                ai_results=ai_analysis.get("all_markets", []),
+            )
+    except Exception:
+        result["ai_analysis"] = None  # never block prediction due to AI layer failure
+
     # ── CLV logging ───────────────────────────────────────────────────────────
     if home_team_name and away_team_name:
         # FIX #21: use the API's stable numeric match ID for CLV tracking instead

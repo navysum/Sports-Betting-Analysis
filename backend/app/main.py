@@ -12,6 +12,7 @@ from app.database import init_db
 from app.api.matches import router as matches_router
 from app.api.predictions import router as predictions_router, preload_today_predictions
 from app.api.admin import router as admin_router
+from app.api.ai import router as ai_router
 from ml.predict import load_model
 from app.services.football_api import build_team_cache
 
@@ -77,6 +78,7 @@ app.add_middleware(
 app.include_router(matches_router, prefix="/api")
 app.include_router(predictions_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
+app.include_router(ai_router, prefix="/api")
 
 
 @app.get("/")
