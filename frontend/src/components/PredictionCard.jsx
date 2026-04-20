@@ -4,6 +4,23 @@ const OC = {
   AWAY: { label: "Away", color: "text-blue-400" },
 };
 
+const GRADE_COLORS = {
+  A: "text-green-400 border-green-700",
+  B: "text-blue-400 border-blue-700",
+  C: "text-yellow-400 border-yellow-700",
+  D: "text-orange-400 border-orange-700",
+  F: "text-red-400 border-red-700",
+};
+
+const REC_COLORS = {
+  "STRONG BET": "text-green-400 bg-green-900/30",
+  "BET":        "text-emerald-400 bg-emerald-900/20",
+  "SMALL BET":  "text-blue-400 bg-blue-900/20",
+  "WATCHLIST":  "text-yellow-500 bg-yellow-900/10",
+  "PASS":       "text-zinc-600",
+  "AVOID":      "text-red-500",
+};
+
 function Bar({ prob, color }) {
   const w = prob != null ? Math.round(prob * 100) : 0;
   return (
@@ -26,6 +43,24 @@ function Stars({ n = 1 }) {
   );
 }
 
+function AIBadge({ ai }) {
+  if (!ai || !ai.grade) return null;
+  const cls = GRADE_COLORS[ai.grade] || GRADE_COLORS.F;
+  const recCls = REC_COLORS[ai.recommendation] || REC_COLORS.PASS;
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className={`inline-flex items-center justify-center w-5 h-5 rounded border text-[10px] font-bold ${cls}`}>
+        {ai.grade}
+      </span>
+      {ai.recommendation && ai.recommendation !== "PASS" && (
+        <span className={`text-[10px] font-medium px-1 rounded ${recCls}`}>
+          {ai.recommendation}
+        </span>
+      )}
+    </div>
+  );
+}
+
 export default function PredictionCard({ data }) {
   const { home_team, away_team, match_date, competition, prediction: pred = {} } = data;
 
@@ -44,6 +79,14 @@ export default function PredictionCard({ data }) {
     Math.max(pred.home_win_prob, pred.draw_prob, pred.away_win_prob) -
     Math.min(pred.home_win_prob, pred.draw_prob, pred.away_win_prob) < 0.08
   );
+
+  // Extract best AI recommendation from ai_analysis
+  const aiAnalysis = pred.ai_analysis;
+  const bestAI = aiAnalysis?.best_recommendation;
+
+  // Fallback flags summary
+  const flags = pred.fallback_flags || {};
+  const hasFallbacks = Object.values(flags).some(Boolean);
 
   return (
     <div className={`border rounded-md p-3 space-y-2.5 ${
@@ -80,12 +123,13 @@ export default function PredictionCard({ data }) {
       {pred.predicted_outcome && !isFlat && (
         <>
           {/* Outcome row */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className={`text-sm font-medium ${oc?.color || "text-zinc-300"}`}>
               {oc?.label}
             </span>
             <Stars n={pred.stars} />
             {conf && <span className="ml-auto text-xs text-zinc-600 tabular-nums">{conf}%</span>}
+            {bestAI && <AIBadge ai={bestAI} />}
           </div>
 
           {/* Bars */}
@@ -143,6 +187,39 @@ export default function PredictionCard({ data }) {
                   </span>
                 );
               })}
+            </div>
+          )}
+
+          {/* Fallback quality flags */}
+          {hasFallbacks && (
+            <div className="flex flex-wrap gap-1">
+              {flags.used_xg_fallback && (
+                <span className="text-[10px] px-1 py-0.5 rounded bg-yellow-900/20 text-yellow-700 border border-yellow-900/50">xG proxy</span>
+              )}
+              {flags.used_dc_fallback && (
+                <span className="text-[10px] px-1 py-0.5 rounded bg-orange-900/20 text-orange-700 border border-orange-900/50">No DC</span>
+              )}
+              {flags.used_global_model && (
+                <span className="text-[10px] px-1 py-0.5 rounded bg-zinc-800 text-zinc-600 border border-zinc-700">Global mdl</span>
+              )}
+            </div>
+          )}
+
+          {/* AI Score (if eligible) */}
+          {bestAI && bestAI.eligible && bestAI.score > 0 && (
+            <div className="flex items-center gap-2 text-[11px] text-zinc-600 border-t border-zinc-800/50 pt-2">
+              <span>AI score</span>
+              <div className="flex-1 h-1 bg-zinc-800 rounded-full overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${
+                    bestAI.score >= 8.5 ? "bg-green-500" :
+                    bestAI.score >= 7.0 ? "bg-blue-500" :
+                    bestAI.score >= 6.0 ? "bg-yellow-500" : "bg-zinc-600"
+                  }`}
+                  style={{ width: `${Math.round((bestAI.score / 10) * 100)}%` }}
+                />
+              </div>
+              <span className="tabular-nums text-zinc-400">{bestAI.score?.toFixed(1)}</span>
             </div>
           )}
         </>

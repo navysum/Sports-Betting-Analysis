@@ -9,6 +9,8 @@ import StatsPage from "./pages/StatsPage";
 import TeamPage from "./pages/TeamPage";
 import DistributionsPage from "./pages/DistributionsPage";
 import MonteCarloPage from "./pages/MonteCarloPage";
+import BestBetsPage from "./pages/BestBetsPage";
+import CLVPage from "./pages/CLVPage";
 
 export default function App() {
   return (
@@ -17,15 +19,17 @@ export default function App() {
         <Navbar />
         <main className="flex-1">
           <Routes>
-            <Route path="/"             element={<HomePage />} />
-            <Route path="/predictions"  element={<PredictionsPage />} />
-            <Route path="/results"      element={<ResultsPage />} />
-            <Route path="/standings"    element={<StandingsPage />} />
-            <Route path="/stats"          element={<StatsPage />} />
+            <Route path="/"              element={<HomePage />} />
+            <Route path="/predictions"   element={<PredictionsPage />} />
+            <Route path="/results"       element={<ResultsPage />} />
+            <Route path="/standings"     element={<StandingsPage />} />
+            <Route path="/stats"         element={<StatsPage />} />
             <Route path="/distributions" element={<DistributionsPage />} />
             <Route path="/montecarlo"    element={<MonteCarloPage />} />
             <Route path="/team/:teamId"  element={<TeamPage />} />
             <Route path="/matches"       element={<ResultsPage />} />
+            <Route path="/best-bets"     element={<BestBetsPage />} />
+            <Route path="/analytics"     element={<CLVPage />} />
           </Routes>
         </main>
         <MobileNav />

@@ -69,4 +69,24 @@ export const getRetrainStatus  = () => api.get("/admin/retrain/status");
 export const getBacktest       = (minEdge = 0.05) =>
   api.get("/admin/backtest", { params: { min_edge: minEdge } });
 export const getCLVStats       = (days = 30) =>
-  api.get("/admin/clv-stats", { params: { days } });
+  api.get("/predictions/clv", { params: { days } });
+
+// ── AI Decision Layer ─────────────────────────────────────────────────────────
+export const getBestBets = ({ minScore = 6.0, minGrade = "C", limit = 10 } = {}) =>
+  api.get("/ai/best-bets", { params: { min_score: minScore, min_grade: minGrade, limit } });
+
+export const analyzeMatch = (prediction, matchInfo, market = null) =>
+  api.post("/ai/analyze", {
+    prediction,
+    match_info: matchInfo,
+    market,
+  });
+
+export const getAIPerformance = (days = 30) =>
+  api.get("/ai/performance", { params: { days } });
+
+export const getAIDecisions = ({ limit = 20, eligibleOnly = true } = {}) =>
+  api.get("/ai/decisions", { params: { limit, eligible_only: eligibleOnly } });
+
+export const getEvaluation = (days = 365) =>
+  api.get("/ai/evaluation", { params: { days } });
