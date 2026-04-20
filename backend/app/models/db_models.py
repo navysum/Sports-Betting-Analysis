@@ -129,3 +129,75 @@ class MatchXG(Base):
     away_xg = Column(Float, nullable=True)
     home_score = Column(Integer, nullable=True)
     away_score = Column(Integer, nullable=True)
+
+
+class AIDecision(Base):
+    """AI Decision Layer output — one row per market per prediction."""
+    __tablename__ = "ai_decisions"
+
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    match_id = Column(String, index=True)
+    match_date = Column(String)
+    league = Column(String)
+    home_team = Column(String)
+    away_team = Column(String)
+    market = Column(String)                 # home / draw / away / over25 / btts / over35
+
+    # AI output
+    recommendation = Column(String)         # STRONG BET / BET / SMALL BET / WATCHLIST / PASS / AVOID
+    grade = Column(String)                  # A / B / C / D / F
+    score = Column(Float)                   # 0–10 weighted composite score
+    risk_level = Column(String)             # LOW / MEDIUM / HIGH
+
+    # Inputs snapshot
+    model_prob = Column(Float)
+    fair_implied = Column(Float, nullable=True)
+    edge = Column(Float, nullable=True)
+    bookmaker_odds = Column(Float, nullable=True)
+    confidence = Column(Float)
+    bet_eligible = Column(Boolean, default=False)
+
+    # Fallback quality flags
+    used_xg_fallback = Column(Boolean, default=False)
+    used_dc_fallback = Column(Boolean, default=False)
+    used_global_model = Column(Boolean, default=False)
+    used_approx_devig = Column(Boolean, default=False)
+
+    # Reasoning
+    reasoning = Column(JSON, nullable=True)   # list of reason strings
+    warnings = Column(JSON, nullable=True)    # list of warning strings
+    stake_modifier = Column(Float, default=1.0)
+
+    # Post-settlement (filled after result is known)
+    actual_outcome = Column(Boolean, nullable=True)    # True = won / False = lost
+    pnl = Column(Float, nullable=True)
+    settled_at = Column(DateTime, nullable=True)
+
+
+class SegmentStats(Base):
+    """Rolling performance by segment (market × league × odds-band)."""
+    __tablename__ = "segment_stats"
+
+    id = Column(Integer, primary_key=True)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    segment_key = Column(String, unique=True, index=True)  # e.g. "PL|over25|1.60-1.80"
+    market = Column(String)
+    league = Column(String)
+    odds_band = Column(String)
+    confidence_band = Column(String, nullable=True)
+
+    # Performance
+    bets = Column(Integer, default=0)
+    wins = Column(Integer, default=0)
+    roi = Column(Float, nullable=True)
+    avg_clv = Column(Float, nullable=True)
+    avg_edge = Column(Float, nullable=True)
+    hit_rate = Column(Float, nullable=True)
+    max_drawdown = Column(Float, nullable=True)
+
+    # Data quality
+    pct_with_clv = Column(Float, nullable=True)
+    pct_exact_devig = Column(Float, nullable=True)
