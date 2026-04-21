@@ -77,8 +77,16 @@ async def _run_retrain():
         _save_cache(X, y_result, y_goals, y_btts, y_over35, dates_merged)
 
         # Step 5 — train
+        # train_all() is CPU-bound and takes 20-30 min. Running it directly in
+        # the async task blocks the event loop, starving keep-alive pings and
+        # causing Render's free tier to kill the process mid-training. Moving it
+        # to a thread executor lets the event loop stay responsive throughout.
         _log("Training models…")
-        summary = train_all(X, y_result, y_goals, y_btts, y_over35, odds_rows=odds_rows_fdco)
+        loop = asyncio.get_event_loop()
+        summary = await loop.run_in_executor(
+            None,
+            lambda: train_all(X, y_result, y_goals, y_btts, y_over35, odds_rows=odds_rows_fdco),
+        )
         _log("Models trained and saved.")
 
         # Step 6 — reload models in-memory
