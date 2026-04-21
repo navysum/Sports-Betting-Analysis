@@ -62,9 +62,11 @@ async def _get(url: str, params: Optional[dict] = None) -> dict:
 async def get_upcoming_matches(competition_code: str = "PL", days_ahead: int = 7) -> list[dict]:
     date_from = datetime.utcnow().strftime("%Y-%m-%d")
     date_to = (datetime.utcnow() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+    # football-data.org moves matches from SCHEDULED to TIMED once kickoff times
+    # are confirmed. Both statuses must be requested or today's fixtures are invisible.
     data = await _get(
         f"{BASE_URL}/competitions/{competition_code}/matches",
-        {"status": "SCHEDULED", "dateFrom": date_from, "dateTo": date_to},
+        {"status": "SCHEDULED,TIMED", "dateFrom": date_from, "dateTo": date_to},
     )
     return data.get("matches", [])
 
