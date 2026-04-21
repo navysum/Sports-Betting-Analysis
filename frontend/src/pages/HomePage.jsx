@@ -269,25 +269,27 @@ export default function HomePage() {
     }
   }
 
+  function startPolling() {
+    clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      const s = await fetchCache();
+      if (s === "ready" || s === "error") clearInterval(pollRef.current);
+    }, 6000);
+  }
+
   async function startPreload() {
     try { await triggerPreload(); } catch {}
     fetchCache();
+    startPolling();
   }
 
   useEffect(() => {
-    // Check cache state on mount
-    fetchCache().then(s => {
+    // Check cache state on mount; also re-trigger if previous run found 0 matches
+    fetchCache().then((s) => {
       if (s === "idle") startPreload();
     });
 
-    // Poll while computing
-    pollRef.current = setInterval(async () => {
-      const s = await fetchCache();
-      if (s === "ready" || s === "error") {
-        clearInterval(pollRef.current);
-      }
-    }, 6000);
-
+    startPolling();
     return () => clearInterval(pollRef.current);
   }, []);
 
@@ -323,6 +325,12 @@ export default function HomePage() {
       {status === "ready" && sorted.length === 0 && (
         <div className="px-4 py-12 text-center">
           <p className="text-sm text-zinc-500">No matches today</p>
+          <button
+            onClick={startPreload}
+            className="mt-3 text-xs text-green-500 hover:text-green-400 transition-colors"
+          >
+            Refresh
+          </button>
         </div>
       )}
 
