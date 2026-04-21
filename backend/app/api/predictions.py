@@ -180,8 +180,14 @@ async def trigger_preload():
     """Manually force the background prediction task to start."""
     date_str = _today_str()
     cached = _today_cache.get(date_str)
-    if cached and cached["status"] in ("computing", "ready"):
-        return {"message": f"Already {cached['status']}", "status": cached["status"]}
+    if cached:
+        if cached["status"] == "computing":
+            return {"message": "Already computing", "status": "computing"}
+        # "ready" with matches → nothing to do; "ready" with 0 matches → allow retry
+        if cached["status"] == "ready" and cached.get("predictions"):
+            return {"message": "Already ready", "status": "ready"}
+    # Clear stale cache entry so preload_today_predictions() sets a fresh one
+    _today_cache.pop(date_str, None)
     asyncio.create_task(preload_today_predictions())
     return {"message": "Preload started", "status": "computing"}
 
