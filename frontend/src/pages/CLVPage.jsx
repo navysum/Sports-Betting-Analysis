@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { getCLVStats, getEvaluation, getAIPerformance } from "../services/api";
+import { getCLVStats, getCLVTimeseries, getEvaluation, getAIPerformance } from "../services/api";
 
 function StatCard({ label, value, sub, positive }) {
   const color = positive === true ? "text-green-400" : positive === false ? "text-red-400" : "text-white";
@@ -102,12 +102,123 @@ function RoiTable({ data, label }) {
   );
 }
 
+function CLVChart({ rows }) {
+  if (!rows || rows.length === 0) return (
+    <p className="text-xs text-zinc-600 py-4 text-center">
+      No CLV history yet — data accumulates once closing odds are recorded.
+    </p>
+  );
+
+  const maxAbs = Math.max(...rows.map(r => Math.abs(r.avg_clv)), 0.001);
+  const barMax = Math.max(maxAbs * 100, 1);
+
+  return (
+    <div className="space-y-3">
+      {/* Bar chart */}
+      <div className="space-y-1">
+        {rows.map(r => {
+          const pct = Math.min(Math.abs(r.avg_clv * 100) / barMax * 100, 100);
+          const pos = r.avg_clv >= 0;
+          return (
+            <div key={r.date} className="flex items-center gap-2 text-[10px]">
+              <span className="text-zinc-600 w-20 shrink-0 text-right">{r.date.slice(5)}</span>
+              <div className="flex-1 flex items-center gap-1 h-4">
+                {pos ? (
+                  <>
+                    <div className="w-1/2 flex justify-end">
+                      <div className="h-2.5 bg-zinc-800 rounded-l-sm" style={{ width: "100%" }} />
+                    </div>
+                    <div className="w-1/2 flex justify-start">
+                      <div className="h-2.5 bg-green-500 rounded-r-sm" style={{ width: `${pct}%` }} />
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-1/2 flex justify-end">
+                      <div className="h-2.5 bg-red-500 rounded-l-sm" style={{ width: `${pct}%` }} />
+                    </div>
+                    <div className="w-1/2 flex justify-start">
+                      <div className="h-2.5 bg-zinc-800 rounded-r-sm" style={{ width: "100%" }} />
+                    </div>
+                  </>
+                )}
+              </div>
+              <span className={`w-12 text-right font-mono shrink-0 ${pos ? "text-green-400" : "text-red-400"}`}>
+                {pos ? "+" : ""}{(r.avg_clv * 100).toFixed(2)}%
+              </span>
+              <span className="text-zinc-700 w-5 shrink-0">{r.count}</span>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Cumulative line summary */}
+      {rows.length > 0 && (() => {
+        const last = rows[rows.length - 1];
+        const pos = last.cumulative_avg >= 0;
+        return (
+          <div className="border-t border-zinc-800 pt-2 flex items-center justify-between text-xs">
+            <span className="text-zinc-600">Cumulative avg CLV ({rows.length} days)</span>
+            <span className={`font-mono font-semibold ${pos ? "text-green-400" : "text-red-400"}`}>
+              {pos ? "+" : ""}{(last.cumulative_avg * 100).toFixed(2)}%
+            </span>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+function CalibrationDiagram({ rows }) {
+  if (!rows || rows.length === 0) return (
+    <p className="text-xs text-zinc-600 py-4 text-center">No calibration data yet — needs settled predictions.</p>
+  );
+  return (
+    <div className="space-y-2">
+      {rows.map(row => {
+        const exp = row.expected * 100;
+        const act = row.actual * 100;
+        const diff = row.diff * 100;
+        const pos = diff >= 0;
+        return (
+          <div key={row.bucket} className="space-y-0.5">
+            <div className="flex items-center justify-between text-[10px] text-zinc-500">
+              <span>{row.bucket}</span>
+              <span className={pos ? "text-green-400" : "text-red-400"}>
+                {pos ? "+" : ""}{diff.toFixed(1)}pp
+              </span>
+            </div>
+            <div className="relative h-3 bg-zinc-800 rounded-sm overflow-hidden">
+              {/* Expected (dim) */}
+              <div
+                className="absolute top-0 left-0 h-full bg-zinc-600/50"
+                style={{ width: `${Math.min(exp, 100)}%` }}
+              />
+              {/* Actual (bright) */}
+              <div
+                className={`absolute top-0 left-0 h-full ${pos ? "bg-green-500" : "bg-red-500"} opacity-80`}
+                style={{ width: `${Math.min(act, 100)}%` }}
+              />
+            </div>
+            <div className="flex justify-between text-[10px] text-zinc-700">
+              <span>Expected {exp.toFixed(0)}%</span>
+              <span>{row.count} preds</span>
+              <span>Actual {act.toFixed(0)}%</span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 const TABS = ["CLV", "Calibration", "ROI Report", "AI Performance"];
 
 export default function CLVPage() {
   const [tab, setTab] = useState("CLV");
   const [clvDays, setClvDays] = useState(30);
   const [clvData, setClvData] = useState(null);
+  const [clvSeries, setClvSeries] = useState(null);
   const [evalData, setEvalData] = useState(null);
   const [aiData, setAiData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -118,12 +229,14 @@ export default function CLVPage() {
       setLoading(true);
       setError(null);
       try {
-        const [clv, ev, ai] = await Promise.all([
+        const [clv, series, ev, ai] = await Promise.all([
           getCLVStats(clvDays),
+          getCLVTimeseries(90),
           getEvaluation(365),
           getAIPerformance(30),
         ]);
         setClvData(clv.data);
+        setClvSeries(series.data);
         setEvalData(ev.data);
         setAiData(ai.data);
       } catch (e) {
@@ -207,6 +320,12 @@ export default function CLVPage() {
             />
           </div>
 
+          {/* Rolling CLV chart */}
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3">
+            <h3 className="text-xs text-zinc-500 uppercase tracking-wide mb-3">Daily CLV (last 90 days)</h3>
+            <CLVChart rows={clvSeries || []} />
+          </div>
+
           {/* CLV by market */}
           {clvData?.by_market && Object.keys(clvData.by_market).length > 0 ? (
             <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3">
@@ -233,12 +352,16 @@ export default function CLVPage() {
       {!loading && tab === "Calibration" && (
         <div className="space-y-4">
           <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3">
-            <h3 className="text-xs text-zinc-500 uppercase tracking-wide mb-3">Expected vs actual hit rate</h3>
+            <h3 className="text-xs text-zinc-500 uppercase tracking-wide mb-3">Reliability diagram</h3>
+            <CalibrationDiagram rows={evalData?.calibration || []} />
+          </div>
+          <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3">
+            <h3 className="text-xs text-zinc-500 uppercase tracking-wide mb-3">Calibration table</h3>
             <CalibrationTable rows={evalData?.calibration || []} />
           </div>
           <div className="bg-zinc-900/60 border border-zinc-800 rounded-lg p-3 text-xs text-zinc-600">
-            <p className="text-zinc-400 font-medium mb-1">Reading the calibration table</p>
-            <p>A well-calibrated model shows Diff ≈ 0 across all buckets. Positive diff = model is conservative (actual hit rate higher than predicted). Negative = overconfident.</p>
+            <p className="text-zinc-400 font-medium mb-1">Reading the calibration</p>
+            <p>Green bar wider than dim bar = model is conservative (actual hit rate higher than predicted). Red bar wider = overconfident. Diff ≈ 0 across all buckets = well-calibrated.</p>
           </div>
         </div>
       )}
