@@ -8,7 +8,7 @@ from typing import Optional
 from app.services.prediction_service import predict_match, predict_upcoming_batch
 from app.services.football_api import (
     get_upcoming_matches, get_all_today_matches,
-    SUPPORTED_COMPETITIONS, FDORG_COMPETITIONS,
+    get_standings, SUPPORTED_COMPETITIONS, FDORG_COMPETITIONS,
 )
 
 # Initialize the router with a prefix and tags for Swagger documentation
@@ -64,6 +64,18 @@ async def preload_today_predictions() -> None:
         ]
         _today_cache[date_str]["total"] = len(valid)
         print(f"[preload] {len(valid)} matches to predict for {date_str}")
+
+        # Pre-warm standings cache for every competition that has matches today.
+        # Standings are shared across all matches in the same league, so fetching
+        # them now (while they're uncached) means predict_match() gets cache hits
+        # and doesn't burn API quota inside the per-match loop.
+        active_comps = {m.get("_competition_code") for m in valid if m.get("_competition_code")}
+        for comp_code in active_comps:
+            try:
+                await get_standings(comp_code)
+                print(f"[preload] standings warmed: {comp_code}")
+            except Exception:
+                pass
 
         # Loop through matches and run predictions one by one
         for m in valid:
