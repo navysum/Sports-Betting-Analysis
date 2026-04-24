@@ -187,6 +187,52 @@ def get_clv_stats(days: int = 30) -> dict:
     }
 
 
+def get_clv_timeseries(days: int = 90) -> list[dict]:
+    """
+    Return daily CLV aggregates for the last N days, ordered oldest-first.
+
+    Each item: { date, avg_clv, count, beat_close_rate, cumulative_avg }
+
+    Suitable for rendering a rolling CLV bar/line chart in the frontend.
+    """
+    from datetime import timezone, timedelta
+
+    entries = _load_log()
+    cutoff  = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # Bucket entries by date
+    by_date: dict[str, list[float]] = {}
+    for e in entries:
+        clv = e.get("clv")
+        if clv is None:
+            continue
+        ts = _parse_ts(e.get("logged_at", ""))
+        if ts < cutoff.timestamp():
+            continue
+        date = e.get("date") or e.get("logged_at", "")[:10]
+        by_date.setdefault(date, []).append(clv)
+
+    if not by_date:
+        return []
+
+    rows = []
+    running_sum = 0.0
+    running_n   = 0
+    for date in sorted(by_date.keys()):
+        clvs = by_date[date]
+        day_avg = sum(clvs) / len(clvs)
+        running_sum += sum(clvs)
+        running_n   += len(clvs)
+        rows.append({
+            "date":            date,
+            "avg_clv":         round(day_avg, 4),
+            "count":           len(clvs),
+            "beat_close_rate": round(sum(1 for c in clvs if c > 0) / len(clvs), 4),
+            "cumulative_avg":  round(running_sum / running_n, 4),
+        })
+    return rows
+
+
 def _parse_ts(iso: str) -> float:
     try:
         from datetime import timezone

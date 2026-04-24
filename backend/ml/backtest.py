@@ -1,5 +1,6 @@
 """
 Backtesting module — honest out-of-sample simulation on FDCO historical data.
+Segment breakdowns added: by league, odds bucket, edge bucket, confidence, data quality.
 
 To avoid in-sample bias the backtest uses a TEMPORAL HOLDOUT: matches are
 sorted by date and only the most recent 30% are evaluated (the model was
@@ -91,6 +92,75 @@ def _devig_binary(odds_a: float, odds_b: Optional[float] = None) -> float:
         total = (1.0 / odds_a) + (1.0 / odds_b)
         return (1.0 / odds_a) / total
     return min(max((1.0 / odds_a) / 1.025, 0.01), 0.99)
+
+
+# ─── Segment helpers ─────────────────────────────────────────────────────────
+
+FDCO_LEAGUE_NAMES: dict[str, str] = {
+    "E0": "Premier League", "E1": "Championship", "E2": "League One",
+    "E3": "League Two",     "EC": "Non-League",
+    "SP1": "La Liga",       "SP2": "La Liga 2",
+    "I1": "Serie A",        "I2": "Serie B",
+    "D1": "Bundesliga",     "D2": "Bundesliga 2",
+    "F1": "Ligue 1",        "F2": "Ligue 2",
+    "N1": "Eredivisie",     "B1": "Pro League",
+    "P1": "Primeira Liga",  "SC0": "Scottish Prem",
+    "T1": "Süper Lig",      "G1": "Super League GR",
+}
+
+
+def _odds_bucket(odds: float) -> str:
+    if odds < 1.50: return "1.20–1.50"
+    if odds < 2.00: return "1.50–2.00"
+    if odds < 3.00: return "2.00–3.00"
+    return "3.00+"
+
+
+def _edge_bucket(edge: float) -> str:
+    pct = edge * 100
+    if pct < 5.0:  return "3–5%"
+    if pct < 8.0:  return "5–8%"
+    if pct < 12.0: return "8–12%"
+    return "12%+"
+
+
+def _conf_bucket(conf: float) -> str:
+    pct = conf * 100
+    if pct < 60: return "50–60%"
+    if pct < 70: return "60–70%"
+    if pct < 80: return "70–80%"
+    return "80%+"
+
+
+def _football_season(date_str: str) -> str:
+    """Map a date string (DD/MM/YYYY or YYYY-MM-DD) to a season label like '23/24'."""
+    try:
+        if "/" in date_str:
+            d, m, y = date_str.split("/")
+            year, month = int(y), int(m)
+        else:
+            year, month = int(date_str[:4]), int(date_str[5:7])
+        if month >= 7:
+            return f"{str(year)[2:]}/{str(year + 1)[2:]}"
+        return f"{str(year - 1)[2:]}/{str(year)[2:]}"
+    except Exception:
+        return "Unknown"
+
+
+def _seg_new() -> dict:
+    return {
+        "flat":  {"bets": 0, "wins": 0, "pnl": 0.0},
+        "value": {"bets": 0, "wins": 0, "pnl": 0.0},
+    }
+
+
+def _seg_acc(seg: dict, key: str, won: bool, odds: float) -> None:
+    seg[key]["bets"] += 1
+    if won:
+        seg[key]["wins"] += 1
+        seg[key]["pnl"] += odds - 1.0
+    else:
+        seg[key]["pnl"] -= 1.0
 
 
 # ─── Wilson score confidence interval ────────────────────────────────────────
@@ -199,6 +269,14 @@ def run_backtest(
     # Multi-market Brier accumulators
     brier_result = []; brier_over25 = []; brier_btts = []; brier_over35 = []
     n_dc_fallback = 0
+
+    # ── Segment accumulators ───────────────────────────────────────────────────
+    by_league:   dict[str, dict] = {}
+    by_season:   dict[str, dict] = {}
+    by_odds_bkt: dict[str, dict] = {}
+    by_edge_bkt: dict[str, dict] = {}
+    by_conf_bkt: dict[str, dict] = {}
+    by_quality = {"clean": _seg_new(), "dc_fallback": _seg_new()}
 
     for local_i, row in enumerate(test_rows):
         b365h = row.get("b365h")
@@ -343,12 +421,60 @@ def run_backtest(
                         drawdown     = (peak_bankroll - bankroll) / peak_bankroll * 100
                         max_drawdown = max(max_drawdown, drawdown)
 
+        # ── Segment tracking (result market only) ─────────────────────────────
+        league_name = FDCO_LEAGUE_NAMES.get(row.get("league", ""), row.get("league", "Unknown"))
+        season      = _football_season(row.get("date", ""))
+        odds_bkt    = _odds_bucket(decimal_odds)
+        conf_bkt    = _conf_bucket(pred_prob)
+        qual_key    = "dc_fallback" if dc_info is None else "clean"
+
+        for seg_dict, seg_key in [
+            (by_league,   league_name),
+            (by_season,   season),
+            (by_odds_bkt, odds_bkt),
+            (by_conf_bkt, conf_bkt),
+        ]:
+            if seg_key not in seg_dict:
+                seg_dict[seg_key] = _seg_new()
+            _seg_acc(seg_dict[seg_key], "flat", won, decimal_odds)
+            if edge >= min_edge:
+                _seg_acc(seg_dict[seg_key], "value", won, decimal_odds)
+
+        if edge >= min_edge:
+            e_bkt = _edge_bucket(edge)
+            if e_bkt not in by_edge_bkt:
+                by_edge_bkt[e_bkt] = _seg_new()
+            _seg_acc(by_edge_bkt[e_bkt], "value", won, decimal_odds)
+            _seg_acc(by_quality[qual_key], "value", won, decimal_odds)
+        _seg_acc(by_quality[qual_key], "flat", won, decimal_odds)
+
     # ── Summary helpers ───────────────────────────────────────────────────────
     def _roi(pnl, n):
         return round(pnl / n * 100, 1) if n else 0.0
 
     def _wr(wins, n):
         return round(wins / n * 100, 1) if n else 0.0
+
+    def _seg_fmt(seg: dict) -> dict:
+        out = {}
+        for staking, d in seg.items():
+            n, w, p = d["bets"], d["wins"], d["pnl"]
+            out[staking] = {
+                "bets":     n,
+                "wins":     w,
+                "win_rate": _wr(w, n),
+                "pnl":      round(p, 2),
+                "roi":      _roi(p, n),
+            }
+        return out
+
+    # Fixed ordering for bucket segments
+    _ODDS_ORDER = ["1.20–1.50", "1.50–2.00", "2.00–3.00", "3.00+"]
+    _EDGE_ORDER = ["3–5%", "5–8%", "8–12%", "12%+"]
+    _CONF_ORDER = ["50–60%", "60–70%", "70–80%", "80%+"]
+
+    def _ordered(d: dict, order: list) -> dict:
+        return {k: _seg_fmt(v) for k in order if k in d for v in [d[k]]}
 
     n_test = len(test_rows)
     return {
@@ -410,6 +536,14 @@ def run_backtest(
             "roi":          _roi(ou_value_pnl, ou_val_bets),
             "min_edge_pct": round(min_edge * 100, 1),
         },
+        # ── Segment breakdowns (result market) ────────────────────────────────
+        "by_league":   {k: _seg_fmt(v) for k, v in
+                        sorted(by_league.items(), key=lambda x: -x[1]["flat"]["bets"])},
+        "by_season":   {k: _seg_fmt(v) for k, v in sorted(by_season.items())},
+        "by_odds_bucket":  _ordered(by_odds_bkt, _ODDS_ORDER),
+        "by_edge_bucket":  _ordered(by_edge_bkt, _EDGE_ORDER),
+        "by_confidence":   _ordered(by_conf_bkt, _CONF_ORDER),
+        "by_data_quality": {k: _seg_fmt(v) for k, v in by_quality.items()},
     }
 
 

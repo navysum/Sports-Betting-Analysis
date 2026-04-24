@@ -420,15 +420,32 @@ def predict(
     confidence = round(max(home_p, draw_p, away_p), 4)
     stars = _star_rating(value_bets, best_edge, confidence)
 
-    # ── Bet eligibility gate (per File 1 Section 4.4) ─────────────────────────
-    # A bet is eligible only when data quality is good and edge is real.
-    # This separates "show prediction" from "show as bet recommendation".
+    # ── No-bet detector — explicit AVOID signals ──────────────────────────────
+    # Distinct from the eligibility gate: AVOID means the model has a specific
+    # negative signal (edge is wrong direction, too many quality failures, or
+    # confidence is near-uniform). PASS just means "not good enough to bet".
+    avoid_reasons: list[str] = []
+    if best_edge < 0:
+        avoid_reasons.append(
+            f"Model probability below fair odds (edge {best_edge * 100:.1f}% — market has the edge)"
+        )
+    if sum(bool(v) for v in [used_xg_fallback, used_dc_fallback, used_global_model, used_approx_devig]) >= 3:
+        avoid_reasons.append("Three or more data quality flags active — prediction reliability low")
+    if confidence < 0.52:
+        avoid_reasons.append("Probabilities near-uniform (confidence < 52%) — insufficient signal")
+
+    # ── Bet eligibility gate ───────────────────────────────────────────────────
+    # Five conditions must ALL be true before a bet surfaces as a recommendation.
+    # The data-quality trio (devig, xG, DC) filters low-information predictions;
+    # edge and confidence together filter low-value ones. Changing either
+    # threshold here affects what surfaces on the Best Bets page.
     bet_eligible = all([
-        not used_approx_devig,      # exact two-sided devig available
-        not used_xg_fallback,       # real xG used (not derived from over25 proxy)
-        not used_dc_fallback,       # DC match found for this fixture
-        not used_global_model,      # league-specific model active
-        best_edge >= 0.05,          # minimum 5% edge over fair odds
+        not used_approx_devig,      # exact two-sided devig required
+        not used_xg_fallback,       # real xG source (not shots-on-target proxy)
+        not used_dc_fallback,       # Dixon-Coles converged for this fixture
+        not used_global_model,      # league-specific model (not global fallback)
+        best_edge >= 0.05,          # ≥ 5% edge over the fair implied probability
+        confidence >= 0.55,         # ≥ 55% model confidence on the predicted outcome
     ])
 
     return {
@@ -470,4 +487,8 @@ def predict(
             "used_approx_devig":  used_approx_devig,
         },
         "bet_eligible": bet_eligible,
+        "avoid_signal": {
+            "should_avoid": len(avoid_reasons) > 0,
+            "reasons":      avoid_reasons,
+        },
     }
