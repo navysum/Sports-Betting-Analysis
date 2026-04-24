@@ -43,6 +43,13 @@ def _headers() -> dict:
 async def _get(url: str, params: Optional[dict] = None) -> dict:
     """Rate-limited GET — enforces 6.5s minimum gap to stay within 10 req/min free tier."""
     global _last_request_time
+
+    if not settings.football_data_api_key:
+        raise RuntimeError(
+            "FOOTBALL_DATA_API_KEY is not set. "
+            "Add it to backend/.env (see .env.example) or set it as an environment variable."
+        )
+
     async with _rate_lock:
         now = asyncio.get_event_loop().time()
         wait = max(0.0, 6.5 - (now - _last_request_time))
@@ -52,6 +59,11 @@ async def _get(url: str, params: Optional[dict] = None) -> dict:
 
         async with httpx.AsyncClient(timeout=20) as client:
             resp = await client.get(url, headers=_headers(), params=params)
+            if resp.status_code == 401:
+                raise RuntimeError(
+                    f"football-data.org returned 401 Unauthorised — "
+                    f"check your FOOTBALL_DATA_API_KEY is valid."
+                )
             if resp.status_code == 429:
                 await asyncio.sleep(60)
                 resp = await client.get(url, headers=_headers(), params=params)

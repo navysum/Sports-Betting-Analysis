@@ -58,7 +58,16 @@ async def preload_today_predictions() -> None:
 
     try:
         # Fetch today's schedule
-        matches = await get_all_today_matches()
+        try:
+            matches = await get_all_today_matches()
+        except RuntimeError as api_err:
+            # API key missing or auth failure — surface clearly rather than silently returning 0 matches
+            msg = str(api_err)
+            print(f"[preload] API configuration error: {msg}")
+            _today_cache[date_str]["status"] = "error"
+            _today_cache[date_str]["error"] = msg
+            return
+
         valid = [
             m for m in matches
             if m.get("homeTeam", {}).get("id") and m.get("awayTeam", {}).get("id")
