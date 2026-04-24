@@ -248,6 +248,7 @@ export default function HomePage() {
   const [items, setItems]     = useState([]);
   const [done, setDone]       = useState(0);
   const [total, setTotal]     = useState(0);
+  const [apiError, setApiError] = useState(null);
   const pollRef               = useRef(null);
 
   const dateLabel = new Date().toLocaleDateString("en-GB", {
@@ -262,9 +263,11 @@ export default function HomePage() {
       setItems(d.predictions || []);
       setDone(d.done || 0);
       setTotal(d.total || 0);
+      setApiError(d.error || null);
       return d.status;
     } catch {
       setStatus("error");
+      setApiError("Cannot reach the backend. Is it running?");
       return "error";
     }
   }
@@ -311,8 +314,25 @@ export default function HomePage() {
 
       {/* Error */}
       {status === "error" && (
-        <div className="px-4 py-3 text-xs text-red-500">
-          Failed to load predictions. Is the backend running?
+        <div className="px-4 py-6 space-y-2">
+          <p className="text-sm text-red-400">Failed to load matches</p>
+          {apiError && (
+            <p className="text-xs text-red-400/70 font-mono break-words">{apiError}</p>
+          )}
+          {apiError?.includes("FOOTBALL_DATA_API_KEY") && (
+            <p className="text-xs text-zinc-500 mt-2">
+              Set <span className="font-mono text-zinc-300">FOOTBALL_DATA_API_KEY</span> in{" "}
+              <span className="font-mono text-zinc-300">backend/.env</span>.
+              Get a free key at{" "}
+              <span className="font-mono text-zinc-400">football-data.org</span>.
+            </p>
+          )}
+          <button
+            onClick={startPreload}
+            className="mt-2 text-xs text-green-500 hover:text-green-400 transition-colors"
+          >
+            Retry
+          </button>
         </div>
       )}
 
@@ -325,6 +345,9 @@ export default function HomePage() {
       {status === "ready" && sorted.length === 0 && (
         <div className="px-4 py-12 text-center">
           <p className="text-sm text-zinc-500">No matches today</p>
+          <p className="text-xs text-zinc-600 mt-1">
+            None of the tracked leagues (PL, Championship, La Liga, Serie A, Bundesliga, Ligue 1…) have fixtures scheduled today.
+          </p>
           <button
             onClick={startPreload}
             className="mt-3 text-xs text-green-500 hover:text-green-400 transition-colors"
