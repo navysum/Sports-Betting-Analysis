@@ -161,44 +161,89 @@ async def get_team_away_matches(team_id: int, limit: int = 15) -> list[dict]:
 
 
 async def get_h2h(match_id: int) -> list[dict]:
-    """Head-to-head using the match's own H2H endpoint."""
+    """Head-to-head using the match's own H2H endpoint. Cached for 20 h — historical data never changes."""
+    key = f"h2h_{match_id}"
+    cached = _cache_get(key)
+    if cached is not None:
+        return cached
     data = await _get(f"{BASE_URL}/matches/{match_id}/head2head", {"limit": 10})
-    return data.get("matches", [])
+    matches = data.get("matches", [])
+    _cache_set(key, matches)
+    return matches
 
 
 async def get_team_info(team_id: int) -> dict:
     return await _get(f"{BASE_URL}/teams/{team_id}")
 
 
-async def get_all_today_matches() -> list[dict]:
-    """Pull today's matches across all supported FDORG competitions."""
+async def _get_matches_bulk(date_from: str, date_to: str) -> list[dict]:
+    """
+    Single-call bulk fetch for all competitions on a date range.
+
+    football-data.org /v4/matches returns matches across all subscribed
+    competitions in one request — 9× faster than the per-competition loop.
+    Each match already has a competition object; we map it to our codes.
+    Falls back to the serial per-competition approach if the endpoint rejects.
+    """
+    try:
+        data = await _get(
+            f"{BASE_URL}/matches",
+            {"dateFrom": date_from, "dateTo": date_to,
+             "status": "SCHEDULED,TIMED,IN_PLAY,PAUSED,FINISHED"},
+        )
+        matches = data.get("matches", [])
+        results = []
+        for m in matches:
+            code = (m.get("competition") or {}).get("code", "")
+            if code not in FDORG_COMPETITIONS:
+                continue
+            m["_competition_code"] = code
+            m["_competition_name"] = SUPPORTED_COMPETITIONS.get(code, code)
+            results.append(m)
+        print(f"[football_api] bulk fetch: {len(results)} match(es) {date_from}")
+        return results
+    except Exception as e:
+        print(f"[football_api] bulk fetch failed ({e}), falling back to serial")
+        return []
+
+
+async def _get_matches_serial(date_from: str, date_to: str, status: str) -> list[dict]:
+    """Serial per-competition fallback. Rate limiter handles the 6.5 s gap — no extra sleep needed."""
     results = []
     for code in FDORG_COMPETITIONS:
         try:
-            matches = await get_today_matches(code)
-            print(f"[football_api] {code}: {len(matches)} match(es) today")
+            data = await _get(
+                f"{BASE_URL}/competitions/{code}/matches",
+                {"status": status, "dateFrom": date_from, "dateTo": date_to},
+            )
+            matches = data.get("matches", [])
+            print(f"[football_api] {code}: {len(matches)} match(es) {date_from}")
             for m in matches:
                 m["_competition_code"] = code
                 m["_competition_name"] = SUPPORTED_COMPETITIONS.get(code, code)
             results.extend(matches)
-            await asyncio.sleep(6)  # stay within 10 req/min
         except Exception as e:
             print(f"[football_api] {code}: failed — {e}")
     return results
 
 
+async def get_all_today_matches() -> list[dict]:
+    """Pull today's matches across all supported FDORG competitions (bulk first, serial fallback)."""
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    results = await _get_matches_bulk(today, today)
+    if not results:
+        results = await _get_matches_serial(
+            today, today, "SCHEDULED,TIMED,IN_PLAY,PAUSED,FINISHED"
+        )
+    return results
+
+
 async def get_all_tomorrow_matches() -> list[dict]:
-    results = []
-    for code in FDORG_COMPETITIONS:
-        try:
-            matches = await get_tomorrow_matches(code)
-            for m in matches:
-                m["_competition_code"] = code
-                m["_competition_name"] = SUPPORTED_COMPETITIONS.get(code, code)
-            results.extend(matches)
-            await asyncio.sleep(6)
-        except Exception:
-            pass
+    """Pull tomorrow's matches across all supported FDORG competitions (bulk first, serial fallback)."""
+    tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
+    results = await _get_matches_bulk(tomorrow, tomorrow)
+    if not results:
+        results = await _get_matches_serial(tomorrow, tomorrow, "SCHEDULED,TIMED")
     return results
 
 

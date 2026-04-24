@@ -20,6 +20,54 @@ from app.services.football_api import build_team_cache
 _scheduler = AsyncIOScheduler(timezone="UTC")
 
 
+async def _settle_yesterday() -> None:
+    """
+    Nightly job (23:00 UTC): fetch yesterday's match results and update CLV log.
+
+    For each prediction logged without closing odds, fetch the Pinnacle closing
+    line and call clv_tracker.update_closing().  Skips entries that already have
+    CLV filled in or are for today/future dates.
+    """
+    from datetime import date, timedelta
+    from app.services.clv_tracker import _load_log, update_closing
+    from app.services.football_api import get_odds
+
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    entries = _load_log()
+    pending = [
+        e for e in entries
+        if e.get("clv") is None and e.get("date", "") <= yesterday
+    ]
+
+    if not pending:
+        print("[settlement] No pending CLV entries to settle")
+        return
+
+    print(f"[settlement] Settling {len(pending)} CLV entries for dates up to {yesterday}")
+    updated = 0
+    for entry in pending:
+        try:
+            match_id = entry["id"]
+            market   = entry["market"]
+            odds     = await get_odds(match_id)
+            if not odds:
+                continue
+            pinnacle = odds.get("pinnacle") or {}
+            market_key = {
+                "home":   "home",
+                "draw":   "draw",
+                "away":   "away",
+                "over25": "over25",
+            }.get(market)
+            if market_key and pinnacle.get(market_key):
+                update_closing(match_id, market, pinnacle[market_key])
+                updated += 1
+        except Exception as exc:
+            print(f"[settlement] Error settling {entry.get('id')}: {exc}")
+
+    print(f"[settlement] Done — updated={updated}, skipped={len(pending) - updated}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -48,6 +96,15 @@ async def lifespan(app: FastAPI):
         id="daily_preload",
         replace_existing=True,
     )
+
+    # Nightly settlement: walk yesterday's predictions, fetch results, compute CLV
+    _scheduler.add_job(
+        _settle_yesterday,
+        CronTrigger(hour=23, minute=0, timezone="UTC"),
+        id="nightly_settlement",
+        replace_existing=True,
+    )
+
     _scheduler.start()
 
     yield # --- The app is now running and handling requests ---

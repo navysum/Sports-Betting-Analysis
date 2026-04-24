@@ -335,6 +335,13 @@ async def clv_stats(days: int = 30):
     return get_clv_stats(days=days)
 
 
+@router.get("/clv-timeseries")
+async def clv_timeseries(days: int = 90):
+    """Return daily CLV aggregates for chart rendering."""
+    from app.services.clv_tracker import get_clv_timeseries
+    return get_clv_timeseries(days=days)
+
+
 # ── Backtest ───────────────────────────────────────────────────────────────────
 
 # Cache backtest result for 6 hours — it's CPU-intensive (predicts on ~11k rows)
