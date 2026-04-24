@@ -70,6 +70,8 @@ export const getBacktest       = (minEdge = 0.05) =>
   api.get("/admin/backtest", { params: { min_edge: minEdge } });
 export const getCLVStats       = (days = 30) =>
   api.get("/predictions/clv", { params: { days } });
+export const getCLVTimeseries  = (days = 90) =>
+  api.get("/admin/clv-timeseries", { params: { days } });
 
 // ── AI Decision Layer ─────────────────────────────────────────────────────────
 export const getBestBets = ({ minScore = 6.0, minGrade = "C", limit = 10 } = {}) =>

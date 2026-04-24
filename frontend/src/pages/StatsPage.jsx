@@ -259,6 +259,51 @@ function roi(v) {
   return `${s}${v.toFixed(1)}%`;
 }
 
+function SegmentTable({ label, data, staking = "value" }) {
+  if (!data || Object.keys(data).length === 0) return null;
+  const rows = Object.entries(data)
+    .map(([key, seg]) => ({ key, ...seg[staking] }))
+    .filter(r => r.bets > 0)
+    .sort((a, b) => (b.roi ?? -999) - (a.roi ?? -999));
+  if (rows.length === 0) return null;
+  return (
+    <div className="border border-zinc-800 rounded-md overflow-hidden">
+      <div className="px-4 py-2 border-b border-zinc-800/60 flex items-center justify-between">
+        <span className="text-xs font-medium text-zinc-400">{label}</span>
+        <span className="text-[10px] text-zinc-700 uppercase tracking-wide">{staking} staking</span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-zinc-600 border-b border-zinc-800">
+              <th className="text-left px-4 py-1.5 font-normal">Segment</th>
+              <th className="text-right px-2 py-1.5 font-normal">Bets</th>
+              <th className="text-right px-2 py-1.5 font-normal">WR%</th>
+              <th className="text-right px-4 py-1.5 font-normal">ROI%</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(r => (
+              <tr key={r.key} className="border-b border-zinc-800/50">
+                <td className="px-4 py-1.5 text-zinc-400">{r.key}</td>
+                <td className="text-right px-2 py-1.5 text-zinc-500">{r.bets}</td>
+                <td className="text-right px-2 py-1.5 text-zinc-400">
+                  {r.win_rate != null ? `${r.win_rate.toFixed(0)}%` : "—"}
+                </td>
+                <td className={`text-right px-4 py-1.5 font-medium ${
+                  r.roi == null ? "text-zinc-600" : r.roi >= 0 ? "text-green-400" : "text-red-400"
+                }`}>
+                  {r.roi != null ? roi(r.roi) : "—"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function BacktestPanel() {
   const [bt, setBt] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -346,6 +391,19 @@ function BacktestPanel() {
                 />
               </div>
             </div>
+          )}
+
+          {/* Segment breakdowns */}
+          {(bt.by_league || bt.by_season || bt.by_odds_bucket || bt.by_edge_bucket || bt.by_confidence || bt.by_data_quality) && (
+            <>
+              <p className="text-[10px] text-zinc-600 uppercase tracking-wide pt-2">Segment breakdown — value staking</p>
+              <SegmentTable label="ROI by league" data={bt.by_league} />
+              <SegmentTable label="ROI by season" data={bt.by_season} />
+              <SegmentTable label="ROI by odds band" data={bt.by_odds_bucket} />
+              <SegmentTable label="ROI by edge bucket" data={bt.by_edge_bucket} />
+              <SegmentTable label="ROI by confidence" data={bt.by_confidence} />
+              <SegmentTable label="ROI by data quality" data={bt.by_data_quality} />
+            </>
           )}
 
           {bt._cached_at && (
