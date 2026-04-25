@@ -57,16 +57,27 @@ async def preload_today_predictions() -> None:
     _today_cache[date_str] = {"status": "computing", "phase": "starting", "predictions": [], "done": 0, "total": 0}
 
     try:
-        # Fetch today's schedule
-        try:
-            matches = await get_all_today_matches()
-        except RuntimeError as api_err:
-            # API key missing or auth failure — surface clearly rather than silently returning 0 matches
-            msg = str(api_err)
-            print(f"[preload] API configuration error: {msg}")
-            _today_cache[date_str]["status"] = "error"
-            _today_cache[date_str]["error"] = msg
-            return
+        # Fetch today's schedule — retry once after 30 s if the first attempt
+        # returns nothing (transient API issue, rate-limit recovery, etc.)
+        matches = []
+        for attempt in range(2):
+            try:
+                matches = await get_all_today_matches()
+                if matches:
+                    break
+                if attempt == 0:
+                    print(f"[preload] 0 matches on attempt 1 — retrying in 30 s…")
+                    _today_cache[date_str]["phase"] = "retrying"
+                    await asyncio.sleep(30)
+            except RuntimeError as api_err:
+                msg = str(api_err)
+                print(f"[preload] API error: {msg}")
+                _today_cache[date_str]["status"] = "error"
+                _today_cache[date_str]["error"] = msg
+                return
+
+        if not matches:
+            print(f"[preload] 0 matches after 2 attempts for {date_str} — genuine blank day or API issue")
 
         valid = [
             m for m in matches
