@@ -227,17 +227,21 @@ function MatchRow({ item }) {
   );
 }
 
-function ProgressBar({ done, total }) {
+function ProgressBar({ done, total, phase }) {
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const label = phase === "predicting" && total > 0
+    ? `Computing predictions… ${done}/${total}`
+    : "Fetching today's fixtures…";
   return (
     <div className="px-4 py-3 border-b border-zinc-800">
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-xs text-zinc-500">Computing predictions…</span>
-        <span className="text-xs text-zinc-600 tabular-nums">{done}/{total}</span>
+        <span className="text-xs text-zinc-500">{label}</span>
+        {total > 0 && <span className="text-xs text-zinc-600 tabular-nums">{done}/{total}</span>}
       </div>
       <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
         <div className="h-full bg-green-600 rounded-full transition-all duration-500"
-             style={{ width: `${pct}%` }} />
+             style={{ width: phase === "predicting" ? `${pct}%` : "100%" }}
+             className={phase === "predicting" ? "" : "animate-pulse"} />
       </div>
     </div>
   );
@@ -245,6 +249,7 @@ function ProgressBar({ done, total }) {
 
 export default function HomePage() {
   const [status, setStatus]   = useState("idle");
+  const [phase, setPhase]     = useState("starting");
   const [items, setItems]     = useState([]);
   const [done, setDone]       = useState(0);
   const [total, setTotal]     = useState(0);
@@ -260,6 +265,7 @@ export default function HomePage() {
       const res = await getTodayPredictions();
       const d = res.data;
       setStatus(d.status);
+      setPhase(d.phase || "starting");
       setItems(d.predictions || []);
       setDone(d.done || 0);
       setTotal(d.total || 0);
@@ -310,7 +316,7 @@ export default function HomePage() {
       </div>
 
       {/* Progress bar while computing */}
-      {status === "computing" && <ProgressBar done={done} total={total} />}
+      {status === "computing" && <ProgressBar done={done} total={total} phase={phase} />}
 
       {/* Error */}
       {status === "error" && (

@@ -8,7 +8,7 @@ from typing import Optional
 from app.services.prediction_service import predict_match, predict_upcoming_batch
 from app.services.football_api import (
     get_upcoming_matches, get_all_today_matches,
-    get_standings, get_team_matches, get_h2h,
+    get_standings,
     SUPPORTED_COMPETITIONS, FDORG_COMPETITIONS,
 )
 
@@ -54,7 +54,7 @@ async def preload_today_predictions() -> None:
 
     date_str = _today_str()
     # Initialize the cache entry for today
-    _today_cache[date_str] = {"status": "computing", "predictions": [], "done": 0, "total": 0}
+    _today_cache[date_str] = {"status": "computing", "phase": "starting", "predictions": [], "done": 0, "total": 0}
 
     try:
         # Fetch today's schedule
@@ -75,40 +75,22 @@ async def preload_today_predictions() -> None:
         _today_cache[date_str]["total"] = len(valid)
         print(f"[preload] {len(valid)} matches to predict for {date_str}")
 
-        # ── Pre-warm API cache before running predictions ──────────────────────
-        # Standings, team histories, and H2H are all rate-limited (6.5 s/call).
-        # Fetching them upfront means predict_match() later gets cache hits, so
-        # the per-match ML loop runs fast without stalling on rate-limit waits.
-
-        # 1. Standings — one per competition, shared by all matches in that league
+        # ── Pre-warm standings only (small, shared by all matches) ────────────
+        # Only standings are worth pre-warming: a single call per competition,
+        # shared by every match in that league.  Team histories and H2H are
+        # per-match — pre-warming them delays the counter from ever moving for
+        # 10+ minutes.  Instead, they fill the disk cache lazily during the
+        # prediction loop, so each subsequent run of the day is instant.
         active_comps = {m.get("_competition_code") for m in valid if m.get("_competition_code")}
         for comp_code in active_comps:
             try:
                 await get_standings(comp_code)
             except Exception:
                 pass
+        if active_comps:
+            print(f"[preload] standings warmed for {len(active_comps)} competition(s)")
 
-        # 2. Team histories — one per unique team (25 matches/team, FINISHED only)
-        unique_team_ids = set()
-        for m in valid:
-            unique_team_ids.add(m["homeTeam"]["id"])
-            unique_team_ids.add(m["awayTeam"]["id"])
-        for team_id in unique_team_ids:
-            try:
-                await get_team_matches(team_id, limit=25)
-            except Exception:
-                pass
-
-        # 3. H2H — one per match; results cached 20 h so subsequent preloads are free
-        for m in valid:
-            if m.get("id"):
-                try:
-                    await get_h2h(m["id"])
-                except Exception:
-                    pass
-
-        print(f"[preload] cache warmed — {len(active_comps)} comps, "
-              f"{len(unique_team_ids)} teams, {len(valid)} H2H sets")
+        _today_cache[date_str]["phase"] = "predicting"
 
         # Loop through matches and run predictions one by one
         for m in valid:
