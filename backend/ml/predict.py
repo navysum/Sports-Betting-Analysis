@@ -27,8 +27,12 @@ import numpy as np
 import joblib
 from typing import Optional
 
-ML_DIR = os.path.dirname(__file__)
-_BLEND_WEIGHTS_PATH = os.path.join(ML_DIR, "..", "data", "blend_weights.json")
+_SCRIPT_DIR = os.path.dirname(__file__)
+# MODEL_DIR env var → Render Persistent Disk (survives restarts/redeploys).
+# Falls back to the script directory so local dev needs no config.
+ML_DIR = os.environ.get("MODEL_DIR") or _SCRIPT_DIR
+os.makedirs(ML_DIR, exist_ok=True)
+_BLEND_WEIGHTS_PATH = os.path.join(_SCRIPT_DIR, "..", "data", "blend_weights.json")
 _DEFAULT_BLEND = {"result": 0.50, "over25": 0.50, "btts": 0.50, "over35": 0.50}
 
 

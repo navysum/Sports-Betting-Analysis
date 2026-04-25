@@ -6,7 +6,7 @@ Data sources (merged):
   2. football-data.org API      — current season, live data
 
 Improvements over v1:
-  - Early stopping (up to 600 trees, stops when val loss plateaus)
+  - Early stopping (up to 1000 trees, stops when val loss plateaus)
   - Draw class weighting (balanced sample_weight for class imbalance)
   - Optional Optuna hyperparameter search (set OPTUNA_TRIALS env var, e.g. 50)
   - SHAP feature importance logged per model
@@ -34,10 +34,15 @@ from sklearn.model_selection import cross_val_score, TimeSeriesSplit
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import log_loss, brier_score_loss
 from sklearn.utils.class_weight import compute_sample_weight
-from ml.features import build_feature_vector, FEATURE_NAMES, N_FEATURES
+from ml.features import build_feature_vector, FEATURE_NAMES, N_FEATURES, FEATURE_VERSION
 from ml.splits import split_indices, TRAIN_FRACTION, CALIBRATION_FRACTION, BLEND_FRACTION
 
-ML_DIR = os.path.dirname(__file__)
+_SCRIPT_DIR = os.path.dirname(__file__)
+# MODEL_DIR env var → Render Persistent Disk (survives restarts/redeploys).
+# Falls back to the script directory so local dev needs no config.
+ML_DIR = os.environ.get("MODEL_DIR") or _SCRIPT_DIR
+os.makedirs(ML_DIR, exist_ok=True)
+
 RESULT_MODEL_PATH  = os.path.join(ML_DIR, "result_model.joblib")
 GOALS_MODEL_PATH   = os.path.join(ML_DIR, "goals_model.joblib")
 BTTS_MODEL_PATH    = os.path.join(ML_DIR, "btts_model.joblib")
@@ -48,7 +53,7 @@ BTTS_CAL_PATH      = os.path.join(ML_DIR, "btts_calibrator.joblib")
 OVER35_CAL_PATH    = os.path.join(ML_DIR, "over35_calibrator.joblib")
 TRAINING_LOG_PATH  = os.path.join(ML_DIR, "training_log.json")
 
-CACHE_DIR  = os.path.join(os.path.dirname(ML_DIR), "data")
+CACHE_DIR  = os.path.join(os.path.dirname(_SCRIPT_DIR), "data")
 CACHE_PATH = os.path.join(CACHE_DIR, "training_cache.npz")
 
 COMPETITIONS = ["PL", "PD", "BL1", "SA", "FL1", "ELC", "DED"]
@@ -106,6 +111,10 @@ def _load_cache() -> tuple:
         if X.shape[1] != N_FEATURES:
             print(f"  [cache] Feature mismatch ({X.shape[1]} vs {N_FEATURES}) — discarding.")
             return empty
+        cached_version = int(data["feature_version"]) if "feature_version" in data else 1
+        if cached_version != FEATURE_VERSION:
+            print(f"  [cache] Feature version changed ({cached_version} → {FEATURE_VERSION}) — discarding.")
+            return empty
         y_over35 = data["y_over35"] if "y_over35" in data else np.zeros(len(X), dtype=np.int64)
         # dates added in v2 — back-fill with empty strings for old caches
         dates = data["dates"] if "dates" in data else np.array([""] * len(X), dtype="U10")
@@ -123,6 +132,7 @@ def _save_cache(X, y_result, y_goals, y_btts, y_over35, dates=None) -> None:
         CACHE_PATH, X=X,
         y_result=y_result, y_goals=y_goals, y_btts=y_btts, y_over35=y_over35,
         dates=dates,
+        feature_version=np.array([FEATURE_VERSION]),
     )
     print(f"  [cache] Saved {len(X)} samples to {CACHE_PATH}")
 
@@ -206,7 +216,7 @@ def _optuna_search(X: np.ndarray, y: np.ndarray, n_classes: int, n_trials: int =
             gamma=trial.suggest_float("gamma", 0.0, 0.5),
         )
         m = _make_xgb(n_classes, **params)
-        cv = TimeSeriesSplit(n_splits=3)
+        cv = TimeSeriesSplit(n_splits=5)
         scores = cross_val_score(m, Xs, ys, cv=cv, scoring="neg_log_loss")
         return -scores.mean()
 
@@ -257,7 +267,7 @@ def _train_and_calibrate(
                        but metrics are reported on it as the honest
                        out-of-sample performance number).
     2. TimeSeriesSplit 5-fold CV on training slice for honest accuracy.
-    3. Final fit with early stopping (up to 600 trees) on 85/15 sub-split.
+    3. Final fit with early stopping (up to 1000 trees) on 85/15 sub-split.
     4. Draw (class 1) up-weighted via balanced sample_weight.
     5. Calibrator fit on the cal slice (adaptive sigmoid/isotonic).
     6. SHAP feature importance logged.
@@ -286,7 +296,7 @@ def _train_and_calibrate(
     # 450 tree builds per per-league model (3 folds × 150 trees).
     if not skip_cv:
         cv_model = _make_xgb(n_classes, n_estimators=150, **hparams)
-        cv = TimeSeriesSplit(n_splits=3)
+        cv = TimeSeriesSplit(n_splits=5)
         scores = cross_val_score(cv_model, X_train, y_train, cv=cv,
                                  scoring="accuracy", fit_params={"sample_weight": sample_weight})
         print(f"  {label} CV accuracy: {scores.mean():.3f} ± {scores.std():.3f}")
@@ -303,7 +313,7 @@ def _train_and_calibrate(
     # unbalanced accuracy — overfitting HOME wins and suppressing draws.
     sw_es  = compute_sample_weight("balanced", y_es)
 
-    final_model = _make_xgb(n_classes, n_estimators=600, **hparams)
+    final_model = _make_xgb(n_classes, n_estimators=1000, **hparams)
     final_model.fit(
         X_fit, y_fit,
         sample_weight=sw_fit,
