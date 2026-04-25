@@ -104,6 +104,8 @@ async def preload_today_predictions() -> None:
         _today_cache[date_str]["phase"] = "predicting"
 
         # Loop through matches and run predictions one by one
+        pred_errors = 0
+        first_error = None
         for m in valid:
             home_id   = m["homeTeam"]["id"]
             away_id   = m["awayTeam"]["id"]
@@ -113,7 +115,6 @@ async def preload_today_predictions() -> None:
             match_date = (m.get("utcDate") or "")[:10]
 
             try:
-                # RUN THE ML MODEL
                 pred = await predict_match(
                     home_team_id=home_id,
                     away_team_id=away_id,
@@ -123,8 +124,6 @@ async def preload_today_predictions() -> None:
                     away_team_name=away_name,
                     match_date=match_date,
                 )
-                
-                # Append result to the cache
                 _today_cache[date_str]["predictions"].append({
                     "api_match_id":     m.get("id"),
                     "match_date":       m.get("utcDate"),
@@ -137,13 +136,25 @@ async def preload_today_predictions() -> None:
                     "prediction":       pred,
                 })
             except Exception as e:
+                pred_errors += 1
+                if first_error is None:
+                    first_error = str(e)
                 print(f"[preload] prediction failed for {home_name} vs {away_name}: {e}")
 
-            # Update progress counter
             _today_cache[date_str]["done"] += 1
 
-        _today_cache[date_str]["status"] = "ready"
-        print(f"[preload] done — {_today_cache[date_str]['done']} predictions cached")
+        n_ok = len(_today_cache[date_str]["predictions"])
+        print(f"[preload] done — {n_ok} predictions cached, {pred_errors} errors")
+
+        if pred_errors > 0 and n_ok == 0:
+            # Every prediction failed — almost certainly means no model is loaded
+            _today_cache[date_str]["status"] = "error"
+            _today_cache[date_str]["error"] = (
+                f"All {pred_errors} predictions failed — model may not be trained yet. "
+                f"First error: {first_error}. Go to Stats → Retrain Model."
+            )
+        else:
+            _today_cache[date_str]["status"] = "ready"
 
     except Exception as e:
         print(f"[preload] failed: {e}")
