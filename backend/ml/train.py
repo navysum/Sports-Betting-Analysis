@@ -6,7 +6,7 @@ Data sources (merged):
   2. football-data.org API      — current season, live data
 
 Improvements over v1:
-  - Early stopping (up to 1500 trees, stops when val loss plateaus)
+  - Early stopping (up to 600 trees, stops when val loss plateaus)
   - Draw class weighting (balanced sample_weight for class imbalance)
   - Optional Optuna hyperparameter search (set OPTUNA_TRIALS env var, e.g. 50)
   - SHAP feature importance logged per model
@@ -66,20 +66,20 @@ def _make_xgb(n_classes: int = 3, **overrides) -> XGBClassifier:
     defaults = dict(
         n_estimators=500,
         max_depth=4,
-        learning_rate=0.05,      # 0.03 → 0.05: fewer rounds to converge; early stopping
-                                 # finds the exact optimum either way, so accuracy unchanged
+        learning_rate=0.05,
         subsample=0.8,
         colsample_bytree=0.75,
         min_child_weight=3,
         gamma=0.15,
-        tree_method="hist",      # histogram algorithm: 3-5× faster than exact on CPU,
-                                 # industry standard (LightGBM/CatBoost use it by default)
+        tree_method="hist",      # 3-5× faster than exact on CPU
+        n_jobs=1,                # single-threaded: on shared/fractional CPU, spawning
+                                 # threads via n_jobs=-1 causes context-switch overhead
+                                 # that makes training slower, not faster
         use_label_encoder=False,
         eval_metric="mlogloss" if n_classes > 2 else "logloss",
         num_class=n_classes if n_classes > 2 else None,
         objective="multi:softprob" if n_classes > 2 else "binary:logistic",
         random_state=42,
-        n_jobs=-1,
     )
     defaults.update(overrides)
     return XGBClassifier(**defaults)
@@ -257,7 +257,7 @@ def _train_and_calibrate(
                        but metrics are reported on it as the honest
                        out-of-sample performance number).
     2. TimeSeriesSplit 5-fold CV on training slice for honest accuracy.
-    3. Final fit with early stopping (up to 1500 trees) on 85/15 sub-split.
+    3. Final fit with early stopping (up to 600 trees) on 85/15 sub-split.
     4. Draw (class 1) up-weighted via balanced sample_weight.
     5. Calibrator fit on the cal slice (adaptive sigmoid/isotonic).
     6. SHAP feature importance logged.
@@ -303,7 +303,7 @@ def _train_and_calibrate(
     # unbalanced accuracy — overfitting HOME wins and suppressing draws.
     sw_es  = compute_sample_weight("balanced", y_es)
 
-    final_model = _make_xgb(n_classes, n_estimators=1500, **hparams)
+    final_model = _make_xgb(n_classes, n_estimators=600, **hparams)
     final_model.fit(
         X_fit, y_fit,
         sample_weight=sw_fit,
