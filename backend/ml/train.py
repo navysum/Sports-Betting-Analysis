@@ -34,7 +34,7 @@ from sklearn.model_selection import cross_val_score, TimeSeriesSplit
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import log_loss, brier_score_loss
 from sklearn.utils.class_weight import compute_sample_weight
-from ml.features import build_feature_vector, FEATURE_NAMES, N_FEATURES
+from ml.features import build_feature_vector, FEATURE_NAMES, N_FEATURES, FEATURE_VERSION
 from ml.splits import split_indices, TRAIN_FRACTION, CALIBRATION_FRACTION, BLEND_FRACTION
 
 _SCRIPT_DIR = os.path.dirname(__file__)
@@ -111,6 +111,10 @@ def _load_cache() -> tuple:
         if X.shape[1] != N_FEATURES:
             print(f"  [cache] Feature mismatch ({X.shape[1]} vs {N_FEATURES}) — discarding.")
             return empty
+        cached_version = int(data["feature_version"]) if "feature_version" in data else 1
+        if cached_version != FEATURE_VERSION:
+            print(f"  [cache] Feature version changed ({cached_version} → {FEATURE_VERSION}) — discarding.")
+            return empty
         y_over35 = data["y_over35"] if "y_over35" in data else np.zeros(len(X), dtype=np.int64)
         # dates added in v2 — back-fill with empty strings for old caches
         dates = data["dates"] if "dates" in data else np.array([""] * len(X), dtype="U10")
@@ -128,6 +132,7 @@ def _save_cache(X, y_result, y_goals, y_btts, y_over35, dates=None) -> None:
         CACHE_PATH, X=X,
         y_result=y_result, y_goals=y_goals, y_btts=y_btts, y_over35=y_over35,
         dates=dates,
+        feature_version=np.array([FEATURE_VERSION]),
     )
     print(f"  [cache] Saved {len(X)} samples to {CACHE_PATH}")
 

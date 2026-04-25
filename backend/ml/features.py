@@ -1,9 +1,10 @@
 """
 Feature engineering for match outcome, over/under, and BTTS prediction.
 
-Feature vector (44 features):
+Feature vector (46 features):
   Form (7):        home_form5, home_form10, away_form5, away_form10, form_diff,
                    home_momentum, away_momentum
+                   form_diff = home_form5_home − away_form5_away (venue-specific)
   Goals (8):       home_gf, home_ga, away_gf, away_ga, home_gf_home, home_ga_home,
                    away_gf_away, away_ga_away
   H2H (3):         h2h_home_rate, h2h_draw_rate, h2h_away_rate
@@ -15,15 +16,16 @@ Feature vector (44 features):
                    (training: SOT × 0.27 proxy; inference: Understat actual xG)
   ELO (1):         elo_diff (home minus away, clamped ±600)
   Attack (3):      home_scoring_std, away_scoring_std, fixture_congestion
-  Shots (4):       home_shots_avg, home_sot_avg, away_shots_avg, away_sot_avg
-                   (always 0.0 — zeroed in training to match inference; XGBoost
-                    assigns near-zero importance; kept for vector position stability)
+  Venue form (4):  home_form5_home, away_form5_away,
+                   home_goal_diff_home, away_goal_diff_away
+                   (venue-specific form — home team at home, away team on road)
   Context (2):     season_stage, away_clean_sheet_rate
+  Draw (2):        home_draw_rate, away_draw_rate
 
 NOTE: N_FEATURES changed from 44 → 46 when draw-propensity features were
-  activated. The training_cache.npz is automatically discarded on feature
-  mismatch (see _load_cache()). Always trigger a retrain immediately after
-  changing N_FEATURES — do not deploy this change without retraining.
+  activated. Shots features (always 0.0) replaced by venue form in v2.
+  The training_cache.npz is automatically discarded on feature version mismatch
+  (see _load_cache()). Always trigger a retrain after changing features.
 
 NOTE: Bookmaker odds are intentionally excluded from features. Including them
 causes the model to replicate market consensus instead of finding independent
@@ -39,6 +41,9 @@ import math
 import numpy as np
 from datetime import date
 from typing import Optional
+
+# Increment when feature semantics change so cached training data is discarded.
+FEATURE_VERSION = 2
 
 
 def _result_for_team(match: dict, team_id: int) -> Optional[str]:
@@ -290,22 +295,27 @@ def build_feature_vector(
     # Total teams in the league — used to normalise standing position to [0,1].
     # Typical values: PL/PD/SA/FL1=20, BL1/DED=18, ELC=24. Default 20.
     total_teams: int = 20,
-    # Shots features — always 0.0 (zeroed in training to match inference)
-    home_shots_avg: float = 0.0,
-    home_sot_avg: float = 0.0,
-    away_shots_avg: float = 0.0,
-    away_sot_avg: float = 0.0,
 ) -> np.ndarray:
     """
     Returns a 1-D float32 numpy feature vector (46 features).
     Feature order MUST stay consistent with training — do not reorder.
     """
+    # --- Venue-filtered match lists (shared by form, goals, and venue features) ---
+    home_home_matches = [m for m in home_matches if m.get("homeTeam", {}).get("id") == home_id]
+    away_away_matches = [m for m in away_matches if m.get("awayTeam", {}).get("id") == away_id]
+
+    # --- Venue-specific form (computed early — used in form_diff below) ---
+    home_form5_home = _form_points(home_home_matches, home_id, 5)
+    away_form5_away = _form_points(away_away_matches, away_id, 5)
+
     # --- Form (exponentially weighted) ---
     hf5  = _form_points(home_matches, home_id, 5)
     hf10 = _form_points(home_matches, home_id, 10)
     af5  = _form_points(away_matches, away_id, 5)
     af10 = _form_points(away_matches, away_id, 10)
-    form_diff      = hf5 - af5
+    # Venue-specific form diff: home team at home vs away team on the road.
+    # More predictive than overall form_diff because venue context dominates.
+    form_diff      = home_form5_home - away_form5_away
     home_momentum  = _form_momentum(home_matches, home_id)
     away_momentum  = _form_momentum(away_matches, away_id)
 
@@ -314,11 +324,13 @@ def build_feature_vector(
     away_gf, away_ga = _goals_for_against(away_matches, away_id)
 
     # --- Goals (home/away splits) ---
-    home_home_matches = [m for m in home_matches if m.get("homeTeam", {}).get("id") == home_id]
-    away_away_matches = [m for m in away_matches if m.get("awayTeam", {}).get("id") == away_id]
     home_gf_h, home_ga_h = _goals_for_against(home_home_matches, home_id)
     away_gf_a, away_ga_a = _goals_for_against(away_away_matches, away_id)
     away_cs_rate = _clean_sheet_rate(away_away_matches, away_id)
+
+    # --- Venue-specific goal diff (GF − GA per game at this venue) ---
+    home_goal_diff_home = home_gf_h - home_ga_h
+    away_goal_diff_away = away_gf_a - away_ga_a
 
     # --- H2H ---
     h2h_h, h2h_d, h2h_a = _h2h_stats(h2h_matches, home_id, away_id)
@@ -381,8 +393,8 @@ def build_feature_vector(
         elo_diff,
         # Attack consistency + fixture load (3)
         home_scoring_std, away_scoring_std, fixture_cong,
-        # Shots (4) — always 0.0, zero-variance; kept for vector position stability
-        home_shots_avg, home_sot_avg, away_shots_avg, away_sot_avg,
+        # Venue-specific form (4) — home team at home, away team on the road
+        home_form5_home, away_form5_away, home_goal_diff_home, away_goal_diff_away,
         # Context (2)
         s_stage, away_cs_rate,
         # Draw propensity (2) — Audit Fix #11
@@ -411,8 +423,8 @@ FEATURE_NAMES = [
     "elo_diff",
     # Attack consistency + fixture load (3)
     "home_scoring_std", "away_scoring_std", "fixture_congestion",
-    # Shots (4) — always 0.0, zero-variance
-    "home_shots_avg", "home_sot_avg", "away_shots_avg", "away_sot_avg",
+    # Venue-specific form (4)
+    "home_form5_home", "away_form5_away", "home_goal_diff_home", "away_goal_diff_away",
     # Context (2)
     "season_stage", "away_clean_sheet_rate",
     # Draw propensity (2) — Audit Fix #11
