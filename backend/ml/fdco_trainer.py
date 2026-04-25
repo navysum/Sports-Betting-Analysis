@@ -270,11 +270,6 @@ def build_fdco_training_data(
                 # Pre-match ELO difference (computed BEFORE updating ELO)
                 elo_diff = elo.get_diff(home_name, away_name)
 
-                # Rolling shots/SOT averages — used for the SOT×0.27 xG proxy only.
-                # Shots features themselves are intentionally zeroed in training so
-                # they match the 0.0 values seen at inference (no live shots API).
-                # Leaving them non-zero during training caused a feature distribution
-                # mismatch (training ≠ inference), silently degrading predictions.
                 home_shots, home_sot = _shots_sot_avg(home_hist[-25:], home_id)
                 away_shots, away_sot = _shots_sot_avg(away_hist[-25:], away_id)
                 _SOT_XG = 0.27  # empirical shots-on-target to xG conversion
@@ -293,17 +288,10 @@ def build_fdco_training_data(
                     match_date=date_str,
                     elo_diff=elo_diff,
                     total_teams=total_teams,
-                    # xG proxy: SOT × 0.27 (non-zero training signal for xG features)
                     home_xg=home_sot * _SOT_XG,
                     away_xg=away_sot * _SOT_XG,
                     home_xg_against=away_sot * _SOT_XG,
                     away_xg_against=home_sot * _SOT_XG,
-                    # Shots features zeroed — match inference behaviour (no live shots API).
-                    # XGBoost will assign zero importance to zero-variance features.
-                    home_shots_avg=0.0,
-                    home_sot_avg=0.0,
-                    away_shots_avg=0.0,
-                    away_sot_avg=0.0,
                 )
 
                 X_all.append(vec)

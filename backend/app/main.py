@@ -69,6 +69,23 @@ async def _settle_yesterday() -> None:
     print(f"[settlement] Done — updated={updated}, skipped={len(pending) - updated}")
 
 
+async def _daily_retrain() -> None:
+    """
+    3am UTC cron: retrain model on fresh data, reload it, then kick off a
+    fresh prediction preload so Today is ready well before users open the app.
+    """
+    print("[scheduler] Starting daily model retrain…")
+    try:
+        await _run_retrain()
+        load_model()
+        print("[scheduler] Daily retrain complete — clearing prediction cache")
+        from app.api.predictions import _today_cache
+        _today_cache.clear()
+        asyncio.create_task(preload_today_predictions())
+    except Exception as e:
+        print(f"[scheduler] Daily retrain failed: {e}")
+
+
 async def _auto_train_then_preload() -> None:
     """
     Run when the service starts with no trained model (e.g. fresh Render deploy).
@@ -108,8 +125,16 @@ async def lifespan(app: FastAPI):
         # 4. Kick off today's predictions immediately
         asyncio.create_task(preload_today_predictions())
 
-    # 4. Schedule a daily 6am UTC preload job
-    # This ensures predictions are refreshed every morning automatically
+    # Daily 3am UTC retrain: refreshes the model with the latest season data,
+    # then immediately kicks off a fresh preload so Today is ready by morning.
+    _scheduler.add_job(
+        _daily_retrain,
+        CronTrigger(hour=3, minute=0, timezone="UTC"),
+        id="daily_retrain",
+        replace_existing=True,
+    )
+
+    # Daily 6am UTC preload: recomputes today's predictions (after retrain above).
     _scheduler.add_job(
         preload_today_predictions,
         CronTrigger(hour=6, minute=0, timezone="UTC"),
