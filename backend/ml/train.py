@@ -37,7 +37,12 @@ from sklearn.utils.class_weight import compute_sample_weight
 from ml.features import build_feature_vector, FEATURE_NAMES, N_FEATURES
 from ml.splits import split_indices, TRAIN_FRACTION, CALIBRATION_FRACTION, BLEND_FRACTION
 
-ML_DIR = os.path.dirname(__file__)
+_SCRIPT_DIR = os.path.dirname(__file__)
+# MODEL_DIR env var → Render Persistent Disk (survives restarts/redeploys).
+# Falls back to the script directory so local dev needs no config.
+ML_DIR = os.environ.get("MODEL_DIR") or _SCRIPT_DIR
+os.makedirs(ML_DIR, exist_ok=True)
+
 RESULT_MODEL_PATH  = os.path.join(ML_DIR, "result_model.joblib")
 GOALS_MODEL_PATH   = os.path.join(ML_DIR, "goals_model.joblib")
 BTTS_MODEL_PATH    = os.path.join(ML_DIR, "btts_model.joblib")
@@ -48,7 +53,7 @@ BTTS_CAL_PATH      = os.path.join(ML_DIR, "btts_calibrator.joblib")
 OVER35_CAL_PATH    = os.path.join(ML_DIR, "over35_calibrator.joblib")
 TRAINING_LOG_PATH  = os.path.join(ML_DIR, "training_log.json")
 
-CACHE_DIR  = os.path.join(os.path.dirname(ML_DIR), "data")
+CACHE_DIR  = os.path.join(os.path.dirname(_SCRIPT_DIR), "data")
 CACHE_PATH = os.path.join(CACHE_DIR, "training_cache.npz")
 
 COMPETITIONS = ["PL", "PD", "BL1", "SA", "FL1", "ELC", "DED"]
