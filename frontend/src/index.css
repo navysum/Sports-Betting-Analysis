@@ -34,39 +34,43 @@ body {
   transition: background 0.2s, color 0.2s;
 }
 
-/* ── Light mode overrides ─────────────────────────────────────────────────── */
+/* ── Light mode — green monochrome ───────────────────────────────────────── */
 html.light body {
-  background: #f1f5f9;
-  color: #0f172a;
+  background: #f0fdf4;
+  color: #052e16;
 }
 
 /* Borders */
 html.light .border-zinc-800,
 html.light .border-zinc-800\/60,
-html.light .border-zinc-800\/40 { border-color: #e2e8f0; }
-html.light .border-zinc-700 { border-color: #cbd5e1; }
+html.light .border-zinc-800\/40 { border-color: #bbf7d0; }
+html.light .border-zinc-700     { border-color: #86efac; }
 
 /* Surfaces / card backgrounds */
 html.light .bg-zinc-900\/30 { background-color: rgba(255,255,255,0.7); }
 html.light .bg-zinc-900\/40 { background-color: rgba(255,255,255,0.9); }
-html.light .bg-zinc-900    { background-color: #ffffff; }
-html.light .bg-zinc-800    { background-color: #e2e8f0; }
+html.light .bg-zinc-900     { background-color: #ffffff; }
+html.light .bg-zinc-800     { background-color: #dcfce7; }
 
 /* Hover states */
-html.light .hover\:bg-zinc-900\/40:hover { background-color: rgba(241,245,249,0.9); }
+html.light .hover\:bg-zinc-900\/40:hover { background-color: rgba(220,252,231,0.8); }
 
-/* Text */
-html.light .text-white  { color: #0f172a; }
-html.light .text-zinc-200 { color: #1e293b; }
-html.light .text-zinc-300 { color: #334155; }
-html.light .text-zinc-400 { color: #475569; }
-html.light .hover\:text-zinc-200:hover { color: #1e293b; }
-html.light .hover\:text-zinc-300:hover { color: #334155; }
-html.light .hover\:text-white:hover    { color: #0f172a; }
+/* Text hierarchy — dark green → lighter green */
+html.light .text-white        { color: #052e16; }
+html.light .text-zinc-200     { color: #14532d; }
+html.light .text-zinc-300     { color: #166534; }
+html.light .text-zinc-400     { color: #15803d; }
+html.light .text-zinc-500     { color: #16a34a; }
+html.light .text-zinc-600     { color: #15803d; }
+html.light .text-zinc-700     { color: #166534; }
+
+html.light .hover\:text-zinc-200:hover { color: #14532d; }
+html.light .hover\:text-zinc-300:hover { color: #166534; }
+html.light .hover\:text-white:hover    { color: #052e16; }
 
 /* Input fields */
-html.light .placeholder-zinc-600::placeholder { color: #94a3b8; }
-html.light .focus\:border-zinc-500:focus { border-color: #94a3b8; }
+html.light .placeholder-zinc-600::placeholder { color: #86efac; }
+html.light .focus\:border-zinc-500:focus       { border-color: #86efac; }
 
 /* SVG stroke colours that reference text- classes — handled via currentColor */
 
