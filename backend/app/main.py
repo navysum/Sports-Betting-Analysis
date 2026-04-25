@@ -1,4 +1,5 @@
 import asyncio  # Async I/O support for concurrent tasks
+import os
 from fastapi import FastAPI  # Core FastAPI framework for building APIs
 from fastapi.middleware.cors import CORSMiddleware  # Handles CORS (cross-origin requests)
 from contextlib import asynccontextmanager  # Manages app lifecycle (startup/shutdown)
@@ -11,9 +12,9 @@ from apscheduler.triggers.cron import CronTrigger
 from app.database import init_db
 from app.api.matches import router as matches_router
 from app.api.predictions import router as predictions_router, preload_today_predictions
-from app.api.admin import router as admin_router
+from app.api.admin import router as admin_router, _run_retrain, _retrain_state
 from app.api.ai import router as ai_router
-from ml.predict import load_model
+from ml.predict import load_model, RESULT_MODEL_PATH
 from app.services.football_api import build_team_cache
 
 # Initialize the background scheduler to run periodic tasks
@@ -68,6 +69,23 @@ async def _settle_yesterday() -> None:
     print(f"[settlement] Done — updated={updated}, skipped={len(pending) - updated}")
 
 
+async def _auto_train_then_preload() -> None:
+    """
+    Run when the service starts with no trained model (e.g. fresh Render deploy).
+    Trains the model first, reloads it, then kicks off today's preload and
+    the team cache build — exactly what normal startup does, just in order.
+    """
+    print("[startup] Auto-training model (this takes 5-10 min on first deploy)…")
+    try:
+        await _run_retrain()
+        load_model()
+        print("[startup] Auto-train complete — model loaded, starting preload")
+    except Exception as e:
+        print(f"[startup] Auto-train failed: {e} — preload will run but predictions may fail")
+    asyncio.create_task(build_team_cache())
+    asyncio.create_task(preload_today_predictions())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -78,15 +96,17 @@ async def lifespan(app: FastAPI):
     # 1. Initialize the database connection
     await init_db()
     
-    # 2. Load the Machine Learning model into memory
+    # 2. Load the ML model — if missing, train first then load
     load_model()
-
-    # 3. Build team search cache so /search works immediately after startup
-    asyncio.create_task(build_team_cache())
-
-    # 4. Kick off today's predictions immediately so they're ready when users arrive
-    # This runs in the background so it doesn't block the app from starting
-    asyncio.create_task(preload_today_predictions())
+    if not os.path.exists(RESULT_MODEL_PATH):
+        print("[startup] No trained model found — running auto-train before preload…")
+        # Train synchronously so preload only starts once the model is ready
+        asyncio.create_task(_auto_train_then_preload())
+    else:
+        # 3. Build team search cache so /search works immediately after startup
+        asyncio.create_task(build_team_cache())
+        # 4. Kick off today's predictions immediately
+        asyncio.create_task(preload_today_predictions())
 
     # 4. Schedule a daily 6am UTC preload job
     # This ensures predictions are refreshed every morning automatically
