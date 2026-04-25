@@ -229,9 +229,11 @@ function MatchRow({ item }) {
 
 function ProgressBar({ done, total, phase }) {
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-  const label = phase === "predicting" && total > 0
-    ? `Computing predictions… ${done}/${total}`
-    : "Fetching today's fixtures…";
+  const label =
+    phase === "predicting" && total > 0 ? `Computing predictions… ${done}/${total}` :
+    phase === "retrying"                ? "No matches on first attempt — retrying in 30 s…" :
+                                          "Fetching today's fixtures…";
+  const isPulsing = phase !== "predicting";
   return (
     <div className="px-4 py-3 border-b border-zinc-800">
       <div className="flex items-center justify-between mb-1.5">
@@ -239,9 +241,10 @@ function ProgressBar({ done, total, phase }) {
         {total > 0 && <span className="text-xs text-zinc-600 tabular-nums">{done}/{total}</span>}
       </div>
       <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
-        <div className="h-full bg-green-600 rounded-full transition-all duration-500"
-             style={{ width: phase === "predicting" ? `${pct}%` : "100%" }}
-             className={phase === "predicting" ? "" : "animate-pulse"} />
+        <div
+          className={`h-full bg-green-600 rounded-full transition-all duration-500 ${isPulsing ? "animate-pulse" : ""}`}
+          style={{ width: phase === "predicting" ? `${pct}%` : "100%" }}
+        />
       </div>
     </div>
   );
