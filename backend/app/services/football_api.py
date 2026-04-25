@@ -196,6 +196,7 @@ async def _get_matches_bulk(date_from: str, date_to: str) -> list[dict]:
     competitions in one request — 9× faster than the per-competition loop.
     Each match already has a competition object; we map it to our codes.
     Falls back to the serial per-competition approach if the endpoint rejects.
+    RuntimeError (missing/invalid API key) is re-raised so callers can surface it.
     """
     try:
         data = await _get(
@@ -214,6 +215,8 @@ async def _get_matches_bulk(date_from: str, date_to: str) -> list[dict]:
             results.append(m)
         print(f"[football_api] bulk fetch: {len(results)} match(es) {date_from}")
         return results
+    except RuntimeError:
+        raise  # API key / auth errors must propagate — don't swallow them
     except Exception as e:
         print(f"[football_api] bulk fetch failed ({e}), falling back to serial")
         return []
@@ -222,6 +225,7 @@ async def _get_matches_bulk(date_from: str, date_to: str) -> list[dict]:
 async def _get_matches_serial(date_from: str, date_to: str, status: str) -> list[dict]:
     """Serial per-competition fallback. Rate limiter handles the 6.5 s gap — no extra sleep needed."""
     results = []
+    errors = 0
     for code in FDORG_COMPETITIONS:
         try:
             data = await _get(
@@ -234,8 +238,15 @@ async def _get_matches_serial(date_from: str, date_to: str, status: str) -> list
                 m["_competition_code"] = code
                 m["_competition_name"] = SUPPORTED_COMPETITIONS.get(code, code)
             results.extend(matches)
+        except RuntimeError:
+            raise  # API key / auth errors must propagate
         except Exception as e:
+            errors += 1
             print(f"[football_api] {code}: failed — {e}")
+    if errors == len(FDORG_COMPETITIONS) and not results:
+        raise RuntimeError(
+            f"All {errors} competition endpoints failed — possible network issue or API outage."
+        )
     return results
 
 
