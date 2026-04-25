@@ -6,7 +6,7 @@ Data sources (merged):
   2. football-data.org API      — current season, live data
 
 Improvements over v1:
-  - Early stopping (up to 600 trees, stops when val loss plateaus)
+  - Early stopping (up to 1000 trees, stops when val loss plateaus)
   - Draw class weighting (balanced sample_weight for class imbalance)
   - Optional Optuna hyperparameter search (set OPTUNA_TRIALS env var, e.g. 50)
   - SHAP feature importance logged per model
@@ -206,7 +206,7 @@ def _optuna_search(X: np.ndarray, y: np.ndarray, n_classes: int, n_trials: int =
             gamma=trial.suggest_float("gamma", 0.0, 0.5),
         )
         m = _make_xgb(n_classes, **params)
-        cv = TimeSeriesSplit(n_splits=3)
+        cv = TimeSeriesSplit(n_splits=5)
         scores = cross_val_score(m, Xs, ys, cv=cv, scoring="neg_log_loss")
         return -scores.mean()
 
@@ -257,7 +257,7 @@ def _train_and_calibrate(
                        but metrics are reported on it as the honest
                        out-of-sample performance number).
     2. TimeSeriesSplit 5-fold CV on training slice for honest accuracy.
-    3. Final fit with early stopping (up to 600 trees) on 85/15 sub-split.
+    3. Final fit with early stopping (up to 1000 trees) on 85/15 sub-split.
     4. Draw (class 1) up-weighted via balanced sample_weight.
     5. Calibrator fit on the cal slice (adaptive sigmoid/isotonic).
     6. SHAP feature importance logged.
@@ -286,7 +286,7 @@ def _train_and_calibrate(
     # 450 tree builds per per-league model (3 folds × 150 trees).
     if not skip_cv:
         cv_model = _make_xgb(n_classes, n_estimators=150, **hparams)
-        cv = TimeSeriesSplit(n_splits=3)
+        cv = TimeSeriesSplit(n_splits=5)
         scores = cross_val_score(cv_model, X_train, y_train, cv=cv,
                                  scoring="accuracy", fit_params={"sample_weight": sample_weight})
         print(f"  {label} CV accuracy: {scores.mean():.3f} ± {scores.std():.3f}")
@@ -303,7 +303,7 @@ def _train_and_calibrate(
     # unbalanced accuracy — overfitting HOME wins and suppressing draws.
     sw_es  = compute_sample_weight("balanced", y_es)
 
-    final_model = _make_xgb(n_classes, n_estimators=600, **hparams)
+    final_model = _make_xgb(n_classes, n_estimators=1000, **hparams)
     final_model.fit(
         X_fit, y_fit,
         sample_weight=sw_fit,
