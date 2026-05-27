@@ -298,7 +298,7 @@ def _train_and_calibrate(
         cv_model = _make_xgb(n_classes, n_estimators=150, **hparams)
         cv = TimeSeriesSplit(n_splits=5)
         scores = cross_val_score(cv_model, X_train, y_train, cv=cv,
-                                 scoring="accuracy", fit_params={"sample_weight": sample_weight})
+                                 scoring="accuracy", params={"sample_weight": sample_weight})
         print(f"  {label} CV accuracy: {scores.mean():.3f} ± {scores.std():.3f}")
     else:
         print(f"  {label} CV skipped (per-league model)")
@@ -313,13 +313,12 @@ def _train_and_calibrate(
     # unbalanced accuracy — overfitting HOME wins and suppressing draws.
     sw_es  = compute_sample_weight("balanced", y_es)
 
-    final_model = _make_xgb(n_classes, n_estimators=1000, **hparams)
+    final_model = _make_xgb(n_classes, n_estimators=1000, early_stopping_rounds=30, **hparams)
     final_model.fit(
         X_fit, y_fit,
         sample_weight=sw_fit,
         eval_set=[(X_es, y_es)],
         sample_weight_eval_set=[sw_es],
-        early_stopping_rounds=30,
         verbose=False,
     )
     best_trees = getattr(final_model, "best_iteration", None) or getattr(final_model, "best_ntree_limit", None)
