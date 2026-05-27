@@ -11,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 # Local application imports - importing logic from other parts of the project
 from app.database import init_db
 from app.api.matches import router as matches_router
-from app.api.predictions import router as predictions_router, preload_today_predictions
+from app.api.predictions import router as predictions_router, preload_today_predictions, load_all_upcoming_from_disk
 from app.api.admin import router as admin_router, _run_retrain, _retrain_state
 from app.api.ai import router as ai_router
 from ml.predict import load_model, RESULT_MODEL_PATH
@@ -112,6 +112,10 @@ async def lifespan(app: FastAPI):
     """
     # 1. Initialize the database connection
     await init_db()
+
+    # Load any previously saved upcoming-prediction caches from disk
+    # so /upcoming responds instantly on the first request after restart
+    load_all_upcoming_from_disk()
     
     # 2. Load the ML model — if missing, train first then load
     load_model()

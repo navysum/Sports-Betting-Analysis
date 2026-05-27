@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -20,6 +22,67 @@ router = APIRouter(prefix="/predictions", tags=["predictions"])
 # Structure: { date_str: {"status": "computing"|"ready", "predictions": [...], "total": int, "done": int} }
 _today_cache: dict = {}
 _preload_running: bool = False
+
+# --- Stale-while-revalidate cache for /upcoming ---
+# Key: (competition, days_ahead)  Value: {"status", "predictions", "computed_at"}
+_upcoming_cache: dict = {}
+_upcoming_refreshing: set = set()
+_UPCOMING_STALE_SECONDS = 1800  # 30 minutes — trigger background refresh after this
+
+# Disk persistence path (shared folder with other API cache files)
+_UPCOMING_CACHE_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "data", "api_cache")
+)
+
+
+def _upcoming_disk_path(competition: str, days_ahead: int) -> str:
+    return os.path.join(_UPCOMING_CACHE_DIR, f"upcoming_preds_{competition}_{days_ahead}.json")
+
+
+def _save_upcoming_to_disk(competition: str, days_ahead: int, entry: dict) -> None:
+    """Persist a cache entry to disk so it survives server restarts."""
+    try:
+        os.makedirs(_UPCOMING_CACHE_DIR, exist_ok=True)
+        with open(_upcoming_disk_path(competition, days_ahead), "w", encoding="utf-8") as f:
+            json.dump(entry, f)
+        print(f"[upcoming cache] saved to disk: {competition}/{days_ahead}d "
+              f"({len(entry.get('predictions', []))} predictions)")
+    except Exception as e:
+        print(f"[upcoming cache] disk save failed ({competition}/{days_ahead}d): {e}")
+
+
+def load_all_upcoming_from_disk() -> None:
+    """
+    Called once at startup — loads every persisted upcoming-prediction file
+    into _upcoming_cache so the first request is served instantly from the
+    disk copy while a background refresh updates it silently.
+    """
+    if not os.path.exists(_UPCOMING_CACHE_DIR):
+        return
+    loaded = 0
+    for fname in os.listdir(_UPCOMING_CACHE_DIR):
+        if not fname.startswith("upcoming_preds_") or not fname.endswith(".json"):
+            continue
+        # Filename pattern: upcoming_preds_<COMPETITION>_<DAYS>.json  e.g. upcoming_preds_PL_7.json
+        inner = fname[len("upcoming_preds_"):-len(".json")]  # → "PL_7"
+        parts = inner.rsplit("_", 1)
+        if len(parts) != 2:
+            continue
+        competition, days_str = parts
+        try:
+            days_ahead = int(days_str)
+        except ValueError:
+            continue
+        try:
+            with open(os.path.join(_UPCOMING_CACHE_DIR, fname), encoding="utf-8") as f:
+                entry = json.load(f)
+            if entry.get("predictions") is not None:
+                _upcoming_cache[(competition, days_ahead)] = entry
+                loaded += 1
+        except Exception as e:
+            print(f"[upcoming cache] failed to load {fname}: {e}")
+    if loaded:
+        print(f"[upcoming cache] loaded {loaded} cache file(s) from disk")
 
 
 def _today_str() -> str:
@@ -164,6 +227,29 @@ async def preload_today_predictions() -> None:
         _preload_running = False
 
 
+async def _refresh_upcoming_cache(competition: str, days_ahead: int) -> None:
+    """Background task: re-runs predict_upcoming_batch and updates memory + disk."""
+    key = (competition, days_ahead)
+    _upcoming_refreshing.add(key)
+    existing = _upcoming_cache.get(key, {})
+    _upcoming_cache[key] = {**existing, "status": "computing"}
+    try:
+        results = await predict_upcoming_batch(competition, days_ahead, save_to_ledger=False)
+        entry = {
+            "status": "ready",
+            "predictions": results,
+            "computed_at": datetime.utcnow().isoformat(),
+        }
+        _upcoming_cache[key] = entry
+        _save_upcoming_to_disk(competition, days_ahead, entry)
+        print(f"[upcoming cache] refreshed {competition}/{days_ahead}d — {len(results)} predictions")
+    except Exception as e:
+        print(f"[upcoming cache] refresh failed {competition}/{days_ahead}d: {e}")
+        _upcoming_cache[key] = {**_upcoming_cache.get(key, {}), "status": "error"}
+    finally:
+        _upcoming_refreshing.discard(key)
+
+
 # --- Request Models (Pydantic) ---
 
 class PredictRequest(BaseModel):
@@ -247,12 +333,50 @@ async def predict_upcoming(
     days_ahead: int = Query(1, ge=1, le=14),
     save_to_ledger: bool = Query(False),
 ):
-    """Returns predictions for matches happening in the next few days."""
+    """
+    Returns predictions for matches in the next few days.
+    Uses stale-while-revalidate: cached data (memory or disk) is returned
+    immediately while a background task silently refreshes.
+    Poll while refreshing=true to pick up the updated results.
+    """
     if competition not in FDORG_COMPETITIONS:
         raise HTTPException(400, "Unsupported competition.")
-    try:
-        results = await predict_upcoming_batch(competition, days_ahead, save_to_ledger)
-        return {"competition": competition, "predictions": results}
-    except Exception as e:
-        raise HTTPException(502, f"Failed to fetch predictions: {e}")
+
+    key = (competition, days_ahead)
+    cached = _upcoming_cache.get(key)
+    is_refreshing = key in _upcoming_refreshing
+
+    # Decide whether to kick off a background refresh
+    if not is_refreshing:
+        if not cached:
+            needs_refresh = True
+        elif cached.get("status") == "error":
+            needs_refresh = True
+        elif cached.get("status") == "ready" and cached.get("computed_at"):
+            age = (datetime.utcnow() - datetime.fromisoformat(cached["computed_at"])).total_seconds()
+            needs_refresh = age > _UPCOMING_STALE_SECONDS
+        else:
+            needs_refresh = False
+
+        if needs_refresh:
+            asyncio.create_task(_refresh_upcoming_cache(competition, days_ahead))
+            is_refreshing = True
+
+    if not cached:
+        # Nothing in cache yet — first ever visit, background task just started
+        return {
+            "competition": competition,
+            "status": "computing",
+            "predictions": [],
+            "refreshing": True,
+            "cached_at": None,
+        }
+
+    return {
+        "competition": competition,
+        "status": cached.get("status", "idle"),
+        "predictions": cached.get("predictions", []),
+        "refreshing": is_refreshing,
+        "cached_at": cached.get("computed_at"),
+    }
 
