@@ -8,11 +8,13 @@ export const COMPETITIONS = {
   ELC: "Championship",
   DED: "Eredivisie",
   PPL: "Primeira Liga",
+  WC:  "World Cup",
 };
 
 export const COMPETITION_FLAGS = {
   PL: "🏴󠁧󠁢󠁥󠁮󠁧󠁿", PD: "🇪🇸", BL1: "🇩🇪", SA: "🇮🇹",
   FL1: "🇫🇷", CL: "🏆", ELC: "🏴󠁧󠁢󠁥󠁮󠁧󠁿", DED: "🇳🇱", PPL: "🇵🇹",
+  WC: "🌍",
 };
 
 /** Dropdown */

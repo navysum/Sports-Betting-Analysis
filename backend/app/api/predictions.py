@@ -330,14 +330,14 @@ async def trigger_preload():
 @router.get("/upcoming")
 async def predict_upcoming(
     competition: str = Query("PL"),
-    days_ahead: int = Query(1, ge=1, le=14),
+    days_ahead: int = Query(1, ge=1, le=30),
     save_to_ledger: bool = Query(False),
+    force: bool = Query(False),
 ):
     """
-    Returns predictions for matches in the next few days.
-    Uses stale-while-revalidate: cached data (memory or disk) is returned
-    immediately while a background task silently refreshes.
-    Poll while refreshing=true to pick up the updated results.
+    Returns predictions for matches in the next N days.
+    Cache never auto-expires — pass force=true to trigger a fresh fetch.
+    On first visit (no cache) a background fetch starts automatically.
     """
     if competition not in FDORG_COMPETITIONS:
         raise HTTPException(400, "Unsupported competition.")
@@ -349,14 +349,13 @@ async def predict_upcoming(
     # Decide whether to kick off a background refresh
     if not is_refreshing:
         if not cached:
-            needs_refresh = True
+            needs_refresh = True          # first ever visit — fetch immediately
         elif cached.get("status") == "error":
-            needs_refresh = True
-        elif cached.get("status") == "ready" and cached.get("computed_at"):
-            age = (datetime.utcnow() - datetime.fromisoformat(cached["computed_at"])).total_seconds()
-            needs_refresh = age > _UPCOMING_STALE_SECONDS
+            needs_refresh = True          # previous attempt failed — retry
+        elif force:
+            needs_refresh = True          # caller explicitly requested a refresh
         else:
-            needs_refresh = False
+            needs_refresh = False         # cache exists and is not forced — keep it forever
 
         if needs_refresh:
             asyncio.create_task(_refresh_upcoming_cache(competition, days_ahead))
