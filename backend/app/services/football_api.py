@@ -30,10 +30,15 @@ SUPPORTED_COMPETITIONS = {
     "DED": "Eredivisie",
     "PPL": "Primeira Liga",
     "PPL2": "Scottish Premiership",  # Note: use BSA or PPL depending on API support
+    "WC":  "FIFA World Cup",
 }
 
 # Competitions available on football-data.org free tier
-FDORG_COMPETITIONS = {"PL", "ELC", "CL", "PD", "SA", "BL1", "FL1", "DED", "PPL"}
+FDORG_COMPETITIONS = {"PL", "ELC", "CL", "PD", "SA", "BL1", "FL1", "DED", "PPL", "WC"}
+
+# Competitions without a standings endpoint (cup/tournament format)
+# get_standings() returns None for these instead of raising
+_NO_STANDINGS = {"WC", "CL", "EL", "ECL"}
 
 
 def _headers() -> dict:
@@ -126,6 +131,9 @@ async def get_live_matches(competition_code: str = "PL") -> list[dict]:
 
 
 async def get_standings(competition_code: str = "PL") -> list[dict]:
+    # Cup / knockout competitions have no league table — skip the API call entirely
+    if competition_code in _NO_STANDINGS:
+        return []
     key = f"standings_{competition_code}"
     cached = _cache_get(key)
     if cached is not None:

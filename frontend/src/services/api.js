@@ -34,9 +34,9 @@ export const getTeamUpcoming = (teamId, limit = 5) =>
   api.get(`/matches/team/${teamId}/upcoming`, { params: { limit } });
 
 // ── Predictions ───────────────────────────────────────────────────────────────
-export const getUpcomingPredictions = (competition = "PL", daysAhead = 1) =>
+export const getUpcomingPredictions = (competition = "PL", daysAhead = 1, force = false) =>
   api.get("/predictions/upcoming", {
-    params: { competition, days_ahead: daysAhead },
+    params: { competition, days_ahead: daysAhead, force },
   });
 
 export const predictMatch = ({
