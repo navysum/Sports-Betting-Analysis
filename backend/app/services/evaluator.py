@@ -6,11 +6,17 @@ Responsibilities:
   - Mark predictions as correct / incorrect
   - Compute rolling accuracy stats
   - Write a brief post-mortem for each settled prediction
-  - Persist everything back to the JSON ledger and SQLite
+  - Persist everything to BOTH the JSON ledger (primary) AND SQLite (secondary)
+
+Dual-write strategy:
+  - JSON remains the source of truth (unchanged behaviour)
+  - Every append/settle also upserts into prediction_ledger table in SQLite
+  - If the DB write fails it is logged but does NOT break the JSON write
 """
 import json
 import math
 import os
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 import asyncio
@@ -18,8 +24,14 @@ import asyncio
 from app.config import settings
 from app.services.football_api import get_finished_matches, FDORG_COMPETITIONS
 
+log = logging.getLogger(__name__)
+
 LEDGER_PATH = os.path.join(settings.data_dir, "predictions.json")
 
+
+# ---------------------------------------------------------------------------
+# JSON helpers (unchanged)
+# ---------------------------------------------------------------------------
 
 def _load_ledger() -> list[dict]:
     if not os.path.exists(LEDGER_PATH):
@@ -37,14 +49,99 @@ def _save_ledger(ledger: list[dict]) -> None:
         json.dump(ledger, f, indent=2)
 
 
+# ---------------------------------------------------------------------------
+# DB helpers — fire-and-forget, never raises
+# ---------------------------------------------------------------------------
+
+async def _upsert_prediction_db(entry: dict) -> None:
+    """
+    Write (or update) a prediction entry into the prediction_ledger table.
+    Silently swallows any DB error so it never breaks the JSON path.
+    """
+    try:
+        from app.database import AsyncSessionLocal
+        from app.models.db_models import PredictionLedger
+        from sqlalchemy import select
+
+        pred = entry.get("prediction", {})
+        actual = entry.get("actual") or {}
+        correct = entry.get("correct") or {}
+
+        async with AsyncSessionLocal() as session:
+            # Check if row already exists
+            result = await session.execute(
+                select(PredictionLedger).where(
+                    PredictionLedger.match_id == entry["match_id"]
+                )
+            )
+            row = result.scalars().first()
+
+            if row is None:
+                row = PredictionLedger(match_id=entry["match_id"])
+                session.add(row)
+
+            # Core fields
+            row.api_match_id      = entry.get("api_match_id")
+            row.match_date        = entry.get("date")
+            row.league            = entry.get("league")
+            row.home_team         = entry.get("home")
+            row.away_team         = entry.get("away")
+
+            # Prediction probabilities
+            row.predicted_result  = pred.get("result")
+            row.result_confidence = pred.get("confidence")
+            row.home_win_prob     = pred.get("home_prob")
+            row.draw_prob         = pred.get("draw_prob")
+            row.away_win_prob     = pred.get("away_prob")
+            row.over25_prob       = pred.get("over_2.5_prob")
+            row.btts_prob         = pred.get("btts_prob")
+            row.stars             = pred.get("stars")
+
+            # Actuals (only set when settled)
+            if actual:
+                row.actual_result  = actual.get("result")
+                row.actual_score   = actual.get("score")
+                row.actual_over25  = actual.get("over25")
+                row.actual_btts    = actual.get("btts")
+
+            # Correctness flags
+            if correct:
+                row.result_correct = correct.get("result")
+                row.over25_correct = correct.get("over25")
+                row.btts_correct   = correct.get("btts")
+
+            # Metadata
+            row.factors_used = entry.get("factors_used")
+            row.key_factors  = entry.get("key_factors")
+            row.post_mortem  = entry.get("post_mortem")
+
+            await session.commit()
+
+    except Exception as exc:
+        log.warning("DB upsert failed for %s (JSON still saved): %s", entry.get("match_id"), exc)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
 def append_prediction(entry: dict) -> None:
-    """Add a new prediction to the ledger."""
+    """Add a new prediction to the JSON ledger and kick off a DB write."""
     ledger = _load_ledger()
-    # Avoid duplicates by match_id
     existing_ids = {e["match_id"] for e in ledger}
     if entry["match_id"] not in existing_ids:
         ledger.append(entry)
         _save_ledger(ledger)
+
+    # DB write — run in background; don't block the caller
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_upsert_prediction_db(entry))
+        else:
+            loop.run_until_complete(_upsert_prediction_db(entry))
+    except Exception as exc:
+        log.warning("Could not schedule DB write for %s: %s", entry.get("match_id"), exc)
 
 
 def get_unsettled_predictions(days_back: int = 3) -> list[dict]:
@@ -61,9 +158,11 @@ def settle_prediction(match_id: str, actual: dict) -> Optional[dict]:
     """
     Update a prediction entry with the actual result and compute correctness.
     actual = {result: "HOME/DRAW/AWAY", score: "2-1", over25: bool, btts: bool}
-    Returns the updated entry.
+    Writes to JSON first, then mirrors to DB.
     """
     ledger = _load_ledger()
+    updated_entry = None
+
     for entry in ledger:
         if entry["match_id"] == match_id:
             entry["actual"] = actual
@@ -72,17 +171,27 @@ def settle_prediction(match_id: str, actual: dict) -> Optional[dict]:
             entry["correct"] = {
                 "result": pred.get("result") == actual.get("result"),
                 "over25": pred.get("over_2.5_predicted") == actual.get("over25"),
-                "btts": pred.get("btts_predicted") == actual.get("btts"),
+                "btts":   pred.get("btts_predicted")    == actual.get("btts"),
             }
 
-            # Tag whether entry had a value bet flagged (for ROI tracking)
             entry["had_value_bet"] = bool(pred.get("value_bets"))
-
-            # Auto post-mortem
-            entry["post_mortem"] = _generate_post_mortem(entry, pred, actual)
+            entry["post_mortem"]   = _generate_post_mortem(entry, pred, actual)
+            updated_entry = entry
             break
 
     _save_ledger(ledger)
+
+    # Mirror settled state to DB
+    if updated_entry:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(_upsert_prediction_db(updated_entry))
+            else:
+                loop.run_until_complete(_upsert_prediction_db(updated_entry))
+        except Exception as exc:
+            log.warning("Could not schedule DB settle for %s: %s", match_id, exc)
+
     return next((e for e in ledger if e["match_id"] == match_id), None)
 
 
@@ -91,8 +200,8 @@ def _generate_post_mortem(entry: dict, pred: dict, actual: dict) -> str:
     lines = []
 
     pred_result = pred.get("result", "?")
-    act_result = actual.get("result", "?")
-    score = actual.get("score", "?")
+    act_result  = actual.get("result", "?")
+    score       = actual.get("score", "?")
 
     if pred_result == act_result:
         lines.append(f"Result correct ({pred_result}) — final score {score}.")
@@ -101,7 +210,6 @@ def _generate_post_mortem(entry: dict, pred: dict, actual: dict) -> str:
         lines.append(
             f"Result wrong: predicted {pred_result} (conf {conf:.0%}), actual {act_result} ({score})."
         )
-        # Identify possible reason
         factors = entry.get("factors_used", [])
         if "home_advantage" in factors and act_result == "AWAY":
             lines.append("Home advantage may have been overweighted.")
@@ -131,9 +239,8 @@ async def evaluate_recent_predictions() -> dict:
     settled_count = 0
     errors = []
 
-    # Build a lookup of recently finished matches
     recent_results: dict[int, dict] = {}
-    for code in list(FDORG_COMPETITIONS)[:5]:  # limit API calls
+    for code in list(FDORG_COMPETITIONS)[:5]:
         try:
             matches = await get_finished_matches(code, limit=30)
             for m in matches:
@@ -149,9 +256,9 @@ async def evaluate_recent_predictions() -> dict:
                         result = "AWAY"
                     recent_results[api_id] = {
                         "result": result,
-                        "score": f"{hg}-{ag}",
+                        "score":  f"{hg}-{ag}",
                         "over25": (hg + ag) > 2,
-                        "btts": hg > 0 and ag > 0,
+                        "btts":   hg > 0 and ag > 0,
                     }
             await asyncio.sleep(7)
         except Exception as e:
@@ -166,19 +273,18 @@ async def evaluate_recent_predictions() -> dict:
     return {
         "settled": settled_count,
         "checked": len(unsettled),
-        "errors": errors,
+        "errors":  errors,
     }
 
 
+# ---------------------------------------------------------------------------
+# Stats helpers (read JSON — unchanged)
+# ---------------------------------------------------------------------------
+
 def _log_loss(settled: list[dict]) -> Optional[float]:
-    """
-    Multiclass log-loss on settled predictions.
-    Requires home_prob/draw_prob/away_prob stored in the ledger entry.
-    Lower is better (perfect model = 0, random = ~1.10).
-    """
-    eps = 1e-7
+    eps    = 1e-7
     ll_sum = 0.0
-    count = 0
+    count  = 0
     for e in settled:
         pred   = e.get("prediction", {})
         actual = e.get("actual", {})
@@ -194,18 +300,13 @@ def _log_loss(settled: list[dict]) -> Optional[float]:
         if p is None:
             continue
         ll_sum += math.log(max(p, eps))
-        count += 1
+        count  += 1
     return round(-ll_sum / count, 4) if count else None
 
 
 def _brier_score(settled: list[dict]) -> Optional[float]:
-    """
-    Multiclass Brier score on settled predictions.
-    Averaged over all 3 outcome classes. Range [0, 2]; lower is better.
-    Random classifier = ~0.67, good model ≈ 0.18–0.22.
-    """
-    bs_sum = 0.0
-    count  = 0
+    bs_sum      = 0.0
+    count       = 0
     outcome_idx = {"HOME": 0, "DRAW": 1, "AWAY": 2}
     for e in settled:
         pred   = e.get("prediction", {})
@@ -213,11 +314,7 @@ def _brier_score(settled: list[dict]) -> Optional[float]:
         result = actual.get("result")
         if result not in outcome_idx:
             continue
-        probs = [
-            pred.get("home_prob"),
-            pred.get("draw_prob"),
-            pred.get("away_prob"),
-        ]
+        probs = [pred.get("home_prob"), pred.get("draw_prob"), pred.get("away_prob")]
         if None in probs:
             continue
         actual_oh = [0.0, 0.0, 0.0]
@@ -229,30 +326,23 @@ def _brier_score(settled: list[dict]) -> Optional[float]:
 
 
 def get_accuracy_stats(days: Optional[int] = None) -> dict:
-    """
-    Compute accuracy, log-loss, and Brier score over settled predictions,
-    optionally filtered to the last N days.
-
-    Returns: {total, correct_result, result_accuracy, over25_accuracy,
-              btts_accuracy, log_loss, brier_score, window_days}
-    """
-    ledger = _load_ledger()
-    settled = [e for e in ledger if e.get("actual") is not None]
+    ledger   = _load_ledger()
+    settled  = [e for e in ledger if e.get("actual") is not None]
 
     if days is not None:
-        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff  = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
         settled = [e for e in settled if e.get("date", "0") >= cutoff]
 
     if not settled:
         return {
-            "total":            0,
-            "correct_result":   0,
-            "result_accuracy":  0.0,
-            "over25_accuracy":  None,
-            "btts_accuracy":    None,
-            "log_loss":         None,
-            "brier_score":      None,
-            "window_days":      days,
+            "total":           0,
+            "correct_result":  0,
+            "result_accuracy": 0.0,
+            "over25_accuracy": None,
+            "btts_accuracy":   None,
+            "log_loss":        None,
+            "brier_score":     None,
+            "window_days":     days,
         }
 
     result_correct = [e for e in settled if e.get("correct", {}).get("result")]
@@ -278,15 +368,11 @@ def get_accuracy_stats(days: Optional[int] = None) -> dict:
 
 
 def get_accuracy_by_league(days: Optional[int] = None) -> dict:
-    """
-    Break down result accuracy by league.
-    Returns dict of {league: {total, correct, accuracy}} sorted by volume.
-    """
-    ledger = _load_ledger()
-    settled = [e for e in ledger if e.get("actual") is not None]
+    ledger   = _load_ledger()
+    settled  = [e for e in ledger if e.get("actual") is not None]
 
     if days:
-        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff  = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
         settled = [e for e in settled if e.get("date", "0") >= cutoff]
 
     leagues: dict[str, dict] = {}
@@ -308,18 +394,14 @@ def get_accuracy_by_league(days: Optional[int] = None) -> dict:
 
 
 def get_value_bet_roi(days: Optional[int] = None) -> dict:
-    """
-    Strike rate for matches where the model flagged a value bet.
-    Returns {bets, wins, strike_rate} or {bets: 0} if no data.
-    """
-    ledger = _load_ledger()
+    ledger  = _load_ledger()
     settled = [
         e for e in ledger
         if e.get("actual") is not None and e.get("had_value_bet")
     ]
 
     if days:
-        cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutoff  = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
         settled = [e for e in settled if e.get("date", "0") >= cutoff]
 
     if not settled:
@@ -327,8 +409,8 @@ def get_value_bet_roi(days: Optional[int] = None) -> dict:
 
     wins = sum(1 for e in settled if e.get("correct", {}).get("result"))
     return {
-        "bets": len(settled),
-        "wins": wins,
+        "bets":        len(settled),
+        "wins":        wins,
         "strike_rate": round(wins / len(settled), 3),
     }
 
@@ -346,17 +428,17 @@ def build_ledger_entry(
 ) -> dict:
     """Construct a fully-formed ledger entry (without actual result yet)."""
     return {
-        "match_id": match_id,
-        "api_match_id": api_match_id,
-        "date": date,
-        "league": league,
-        "home": home,
-        "away": away,
-        "prediction": prediction,
-        "actual": None,
-        "correct": None,
-        "factors_used": factors_used,
-        "key_factors": key_factors,
-        "post_mortem": None,
-        "logged_at": datetime.utcnow().isoformat(),
+        "match_id":      match_id,
+        "api_match_id":  api_match_id,
+        "date":          date,
+        "league":        league,
+        "home":          home,
+        "away":          away,
+        "prediction":    prediction,
+        "actual":        None,
+        "correct":       None,
+        "factors_used":  factors_used,
+        "key_factors":   key_factors,
+        "post_mortem":   None,
+        "logged_at":     datetime.utcnow().isoformat(),
     }

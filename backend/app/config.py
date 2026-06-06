@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     # --- Football API Keys ---
     football_data_api_key: str = ""
     api_football_key: str = ""
-    odds_api_key: str = ""
+    odds_api_key: str = "b591eed7b140c994840041c0246ab9bd"
     rapidapi_key: str = ""
 
     # --- Database Configuration ---

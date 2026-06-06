@@ -42,7 +42,12 @@ async def init_db():
     """
     Initializes the database by creating all defined tables.
     This is called by main.py during the app startup ('lifespan').
+
+    IMPORTANT: models must be imported before create_all so SQLAlchemy's
+    Base.metadata knows about them. Import here to guarantee registration
+    regardless of what else has (or hasn't) been imported yet.
     """
+    import app.models.db_models  # noqa: F401 — registers all ORM classes with Base
     async with engine.begin() as conn:
         # run_sync is required because Base.metadata.create_all is a synchronous SQLAlchemy method
         await conn.run_sync(Base.metadata.create_all)
