@@ -1,0 +1,118 @@
+---
+id: 5a852ae6-7611-416a-bad2-5af577c46cde
+---
+flowchart TB
+    %% Styling Definitions
+    classDef client fill:#3b82f6,stroke:#1d4ed8,stroke-width:2px,color:#fff;
+    classDef backend fill:#10b981,stroke:#047857,stroke-width:2px,color:#fff;
+    classDef ml fill:#8b5cf6,stroke:#6d28d9,stroke-width:2px,color:#fff;
+    classDef ai fill:#f59e0b,stroke:#d97706,stroke-width:2px,color:#fff;
+    classDef storage fill:#6b7280,stroke:#374151,stroke-width:2px,color:#fff;
+    classDef external fill:#ec4899,stroke:#be185d,stroke-width:2px,color:#fff;
+
+    %% Subgraphs
+    subgraph ClientLayer ["1. Frontend Layer (React + Vite + Tailwind)"]
+        A["Dashboard & Navigation<br>(HomePage / Navbar)"]
+        B["Analytic Views<br>(StatsPage / TeamPage / DistributionsPage)"]
+        C["Projections & Simulators<br>(PredictionsPage / MonteCarloPage)"]
+        D["Betting Analysis<br>(BestBetsPage / CLVPage)"]
+    end
+    class A,B,C,D client;
+
+    subgraph BackendAPI ["2. API Gateway (FastAPI Entry Point)"]
+        main["main.py <br>(Uvicorn Server / Lifespan Manager)"]
+        subgraph Routers ["Modular API Routers (/api)"]
+            r_match["matches.py"]
+            r_pred["predictions.py"]
+            r_admin["admin.py"]
+            r_ai["ai.py"]
+        end
+    end
+    class main,r_match,r_pred,r_admin,r_ai backend;
+
+    subgraph BackendServices ["3. Business Logic & Services"]
+        s_pred["prediction_service.py<br>(Pipeline Orchestrator)"]
+        s_clv["clv_tracker.py<br>(Closing Line Value Tracker)"]
+        s_eval["evaluator.py<br>(Prediction Accuracy Audit)"]
+        s_cache["api_cache.py<br>(Performance Cache)"]
+        
+        subgraph DataIntegrations ["Data Fetchers / Scrapers"]
+            api_foot["football_api.py / rapidapi_football.py"]
+            api_odds["odds_api.py"]
+            scr_fb["fbref_scraper.py / scraper.py"]
+        end
+    end
+    class s_pred,s_clv,s_eval,s_cache,api_foot,api_odds,scr_fb backend;
+
+    subgraph MLEngine ["4. Predictive & Calibration Models (ML)"]
+        ml_predict["predict.py<br>(Inference Pipeline)"]
+        ml_train["train.py / fdco_trainer.py<br>(Model Training)"]
+        
+        subgraph MLModels ["Model Files & Scripts"]
+            m_result["result_model.joblib<br>(Match Outcomes)"]
+            m_dc["dixon_coles.py<br>(Poisson Goals Model)"]
+            m_btts["btts_model.joblib<br>(Both Teams to Score)"]
+            m_elo["elo.py<br>(ELO Ratings System)"]
+        end
+    end
+    class ml_predict,ml_train,m_result,m_dc,m_btts,m_elo ml;
+
+    subgraph AIEngine ["5. AI Reasoning & Recommendation Layer"]
+        ai_rec["recommendation_service.py<br>(Value Finder)"]
+        ai_rules["rules_engine.py / scoring_engine.py"]
+        ai_learn["learning_engine.py"]
+        ai_pack["packet_builder.py<br>(LLM Prompt Context)"]
+    end
+    class ai_rec,ai_rules,ai_learn,ai_pack ai;
+
+    subgraph DatabaseLayer ["6. Storage Layer"]
+        DB[("soccerbet.db<br>(SQLite Database)")]
+        db_conn["database.py<br>(SQLAlchemy / Connection Pool)"]
+        db_models["models/<br>(Database Schemas)"]
+    end
+    class DB,db_conn,db_models storage;
+
+    subgraph ExternalSources ["7. External APIs & Web Resources"]
+        ext_rapid["RapidAPI Football<br>(Live fixtures & rosters)"]
+        ext_odds["The-Odds-API<br>(Bookmaker Odds & Closing Lines)"]
+        ext_fbref["FBref Scraper<br>(Advanced player/team stats)"]
+        ext_fdco["Football-Data.co.uk<br>(Historical results & odds CSV)"]
+    end
+    class ext_rapid,ext_odds,ext_fbref,ext_fdco external;
+
+    %% Core Data Flows & Interactions
+    ClientLayer <== "HTTP / JSON" ==> Routers
+    
+    %% Router mappings
+    r_match --> api_foot
+    r_pred --> s_pred
+    r_admin --> ml_train
+    r_ai --> ai_rec
+    
+    %% Service connections
+    s_pred --> ml_predict
+    s_pred --> ai_rec
+    s_clv --> api_odds
+    s_eval --> db_conn
+    
+    %% API connections
+    api_foot --> ext_rapid
+    api_odds --> ext_odds
+    scr_fb --> ext_fbref
+    ml_train --> ext_fdco
+    
+    %% Model inferences
+    ml_predict --> m_result
+    ml_predict --> m_dc
+    ml_predict --> m_btts
+    ml_predict --> m_elo
+    
+    %% AI rules & prompts
+    ai_rec --> ai_rules
+    ai_rules --> ai_learn
+    ai_learn --> ai_pack
+    
+    %% Storage references
+    main --> db_conn
+    db_conn --> DB
+    db_models -. Schema Definitions .-> DB

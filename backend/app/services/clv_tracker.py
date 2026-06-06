@@ -13,21 +13,30 @@ How it works:
      Positive CLV = you found value. Negative CLV = market was right.
 
 Long-term: if avg CLV > 0 across many predictions, the model has real edge.
-If avg CLV ≤ 0, improve the model or stop betting.
+If avg CLV <= 0, improve the model or stop betting.
 
-Stored in data/clv_log.json (append-only, human-readable).
+Dual-write: every entry is saved to BOTH clv_log.json (primary) AND
+the clv_log table in SQLite (secondary, best-effort).
 """
+import asyncio
 import json
+import logging
 import os
 import time
 from datetime import datetime
 from typing import Optional
+
+log = logging.getLogger(__name__)
 
 CLV_LOG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     "data", "clv_log.json",
 )
 
+
+# ---------------------------------------------------------------------------
+# JSON helpers (unchanged)
+# ---------------------------------------------------------------------------
 
 def _load_log() -> list[dict]:
     try:
@@ -42,6 +51,70 @@ def _save_log(entries: list[dict]):
     with open(CLV_LOG_PATH, "w") as f:
         json.dump(entries, f, indent=2)
 
+
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
+
+async def _upsert_clv_db(entry: dict) -> None:
+    """
+    Upsert a CLV entry into the clv_log table.
+    Silently swallows errors so the JSON path is never affected.
+    """
+    try:
+        from app.database import AsyncSessionLocal
+        from app.models.db_models import CLVLog
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(CLVLog).where(
+                    CLVLog.match_id == entry["id"],
+                    CLVLog.market   == entry["market"],
+                )
+            )
+            row = result.scalars().first()
+
+            if row is None:
+                row = CLVLog(match_id=entry["id"], market=entry["market"])
+                session.add(row)
+
+            row.match_date               = entry.get("date")
+            row.home_team                = entry.get("home_team")
+            row.away_team                = entry.get("away_team")
+            row.competition              = entry.get("competition")
+            row.model_prob               = entry.get("model_prob")
+            row.opening_implied          = entry.get("opening_implied")
+            row.pinnacle_opening_implied = entry.get("pinnacle_opening_implied")
+            row.pinnacle_closing_implied = entry.get("pinnacle_closing_implied")
+            row.clv                      = entry.get("clv")
+
+            try:
+                row.logged_at = datetime.fromisoformat(entry["logged_at"])
+            except Exception:
+                pass
+
+            await session.commit()
+
+    except Exception as exc:
+        log.warning("DB upsert failed for CLV %s/%s (JSON still saved): %s",
+                    entry.get("id"), entry.get("market"), exc)
+
+
+def _fire_db_write(entry: dict) -> None:
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_upsert_clv_db(entry))
+        else:
+            loop.run_until_complete(_upsert_clv_db(entry))
+    except Exception as exc:
+        log.warning("Could not schedule CLV DB write: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def log_prediction(
     match_id: str,
@@ -72,38 +145,33 @@ def log_prediction(
         except Exception:
             return None
 
-    # FIX #5: map market names to the correct odds dict keys.
-    # Previously over25/btts/over35 were mapped to None, so every goals-market CLV
-    # entry had implied_prob=None and was unusable. Now over25 maps to the "over25"
-    # key that _extract_best_odds() now populates from the Pinnacle totals market.
-    # btts and over35 remain None (not available from Pinnacle via The Odds API);
-    # those entries are still logged but clearly show no implied probability.
     market_key = {
         "home":   "home",
         "draw":   "draw",
         "away":   "away",
-        "over25": "over25",   # now populated from Pinnacle totals market
-        "over35": None,       # not available via The Odds API
-        "btts":   None,       # not available via The Odds API
+        "over25": "over25",
+        "over35": None,
+        "btts":   None,
     }.get(market, market)
 
     entry = {
-        "id":                      match_id,
-        "date":                    match_date,
-        "home_team":               home_team,
-        "away_team":               away_team,
-        "competition":             competition,
-        "market":                  market,
-        "model_prob":              round(model_prob, 4),
-        "opening_implied":         _implied(opening_odds, market_key) if market_key else None,
-        "pinnacle_opening_implied":_implied(pinnacle_opening_odds, market_key) if market_key else None,
-        "pinnacle_closing_implied":None,   # filled in by update_closing()
-        "clv":                     None,   # filled in by update_closing()
-        "logged_at":               datetime.utcnow().isoformat(),
+        "id":                       match_id,
+        "date":                     match_date,
+        "home_team":                home_team,
+        "away_team":                away_team,
+        "competition":              competition,
+        "market":                   market,
+        "model_prob":               round(model_prob, 4),
+        "opening_implied":          _implied(opening_odds, market_key) if market_key else None,
+        "pinnacle_opening_implied": _implied(pinnacle_opening_odds, market_key) if market_key else None,
+        "pinnacle_closing_implied": None,   # filled in by update_closing()
+        "clv":                      None,   # filled in by update_closing()
+        "logged_at":                datetime.utcnow().isoformat(),
     }
 
     entries.append(entry)
-    _save_log(entries)
+    _save_log(entries)       # JSON — primary
+    _fire_db_write(entry)    # DB  — secondary
 
 
 def update_closing(
@@ -117,17 +185,25 @@ def update_closing(
     """
     entries = _load_log()
     closing_implied = round(1.0 / pinnacle_closing_odds, 4) if pinnacle_closing_odds > 1 else None
+    updated = None
 
     for entry in entries:
         if entry["id"] == match_id and entry["market"] == market and entry["clv"] is None:
             entry["pinnacle_closing_implied"] = closing_implied
             if closing_implied and entry["model_prob"]:
-                # CLV = how much better our model prob is vs the closing implied
                 entry["clv"] = round(entry["model_prob"] - closing_implied, 4)
+            updated = entry
             break
 
-    _save_log(entries)
+    _save_log(entries)       # JSON — primary
 
+    if updated:
+        _fire_db_write(updated)  # DB — secondary (now has CLV filled in)
+
+
+# ---------------------------------------------------------------------------
+# Stats helpers (read from JSON — unchanged)
+# ---------------------------------------------------------------------------
 
 def get_clv_stats(days: int = 30) -> dict:
     """
@@ -136,14 +212,13 @@ def get_clv_stats(days: int = 30) -> dict:
     {
       total_predictions: int,
       predictions_with_clv: int,
-      avg_clv: float,           # positive = consistent edge
-      positive_clv_rate: float, # % of predictions beating closing line
+      avg_clv: float,
+      positive_clv_rate: float,
       by_market: {market: {avg_clv, count, positive_rate}},
     }
     """
-    entries = _load_log()
-
-    cutoff = time.time() - days * 86400
+    entries  = _load_log()
+    cutoff   = time.time() - days * 86400
     relevant = [
         e for e in entries
         if e.get("clv") is not None
@@ -152,21 +227,20 @@ def get_clv_stats(days: int = 30) -> dict:
 
     if not relevant:
         return {
-            "total_predictions": len(entries),
+            "total_predictions":    len(entries),
             "predictions_with_clv": 0,
-            "avg_clv": None,
-            "positive_clv_rate": None,
-            "by_market": {},
+            "avg_clv":              None,
+            "positive_clv_rate":    None,
+            "by_market":            {},
         }
 
-    clvs = [e["clv"] for e in relevant]
-    avg_clv = round(sum(clvs) / len(clvs), 4)
+    clvs         = [e["clv"] for e in relevant]
+    avg_clv      = round(sum(clvs) / len(clvs), 4)
     positive_rate = round(sum(1 for c in clvs if c > 0) / len(clvs), 4)
 
-    by_market: dict[str, dict] = {}
+    by_market: dict[str, list] = {}
     for e in relevant:
-        m = e["market"]
-        by_market.setdefault(m, []).append(e["clv"])
+        by_market.setdefault(e["market"], []).append(e["clv"])
 
     market_stats = {
         m: {
@@ -178,29 +252,25 @@ def get_clv_stats(days: int = 30) -> dict:
     }
 
     return {
-        "total_predictions":   len(entries),
+        "total_predictions":    len(entries),
         "predictions_with_clv": len(relevant),
-        "avg_clv":             avg_clv,
-        "positive_clv_rate":   positive_rate,
-        "by_market":           market_stats,
-        "days":                days,
+        "avg_clv":              avg_clv,
+        "positive_clv_rate":    positive_rate,
+        "by_market":            market_stats,
+        "days":                 days,
     }
 
 
 def get_clv_timeseries(days: int = 90) -> list[dict]:
     """
     Return daily CLV aggregates for the last N days, ordered oldest-first.
-
     Each item: { date, avg_clv, count, beat_close_rate, cumulative_avg }
-
-    Suitable for rendering a rolling CLV bar/line chart in the frontend.
     """
     from datetime import timezone, timedelta
 
     entries = _load_log()
     cutoff  = datetime.now(timezone.utc) - timedelta(days=days)
 
-    # Bucket entries by date
     by_date: dict[str, list[float]] = {}
     for e in entries:
         clv = e.get("clv")
@@ -215,11 +285,11 @@ def get_clv_timeseries(days: int = 90) -> list[dict]:
     if not by_date:
         return []
 
-    rows = []
+    rows        = []
     running_sum = 0.0
     running_n   = 0
     for date in sorted(by_date.keys()):
-        clvs = by_date[date]
+        clvs    = by_date[date]
         day_avg = sum(clvs) / len(clvs)
         running_sum += sum(clvs)
         running_n   += len(clvs)

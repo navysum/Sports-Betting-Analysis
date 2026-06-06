@@ -201,3 +201,34 @@ class SegmentStats(Base):
     # Data quality
     pct_with_clv = Column(Float, nullable=True)
     pct_exact_devig = Column(Float, nullable=True)
+
+
+class APICache(Base):
+    """DB-backed cache for football-data.org API responses (replaces data/api_cache/*.json)."""
+    __tablename__ = "api_cache"
+
+    id         = Column(Integer, primary_key=True)
+    cache_key  = Column(String, unique=True, index=True, nullable=False)
+    data       = Column(JSON, nullable=False)
+    fetched_at = Column(Float, nullable=False)   # unix timestamp
+
+
+class CLVLog(Base):
+    """Closing Line Value log — one row per market per prediction."""
+    __tablename__ = "clv_log"
+
+    id = Column(Integer, primary_key=True)
+    logged_at = Column(DateTime, default=datetime.utcnow)
+
+    match_id    = Column(String, index=True)          # e.g. "EPL-2026-04-10-ARS-CHE"
+    match_date  = Column(String)
+    home_team   = Column(String)
+    away_team   = Column(String)
+    competition = Column(String)
+    market      = Column(String)                      # home / draw / away / over25 / btts / over35
+
+    model_prob                = Column(Float, nullable=True)
+    opening_implied           = Column(Float, nullable=True)   # best bookmaker
+    pinnacle_opening_implied  = Column(Float, nullable=True)   # Pinnacle at prediction time
+    pinnacle_closing_implied  = Column(Float, nullable=True)   # Pinnacle at kick-off (filled later)
+    clv                       = Column(Float, nullable=True)   # model_prob - pinnacle_closing_implied
