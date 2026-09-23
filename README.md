@@ -2,6 +2,15 @@
 
 A football prediction platform built for the serious bettor. It combines a Dixon-Coles statistical model with an XGBoost ensemble, runs Monte Carlo match simulations, tracks Closing Line Value (CLV) against Pinnacle, and surfaces value bets automatically — all refreshed daily and served through a React dashboard.
 
+Built with Neil, from April to June 2026.
+
+**Status (23 Sep 2026): the frontend is live, but the model data is stale.** The
+dashboard is up at https://sports-betting-analysis-two.vercel.app, with the
+backend on Render. GitHub **disabled both scheduled workflows for inactivity**:
+*Daily Data Cache Refresh + CLV Snapshot* last ran on 6 Aug 2026, and *Weekly
+Model Retrain* on 9 Aug 2026. Until they are re-enabled under **Actions**, cached
+data and model parameters are not refreshed. The last code change was on 6 Jun 2026.
+
 ---
 
 ## What it does
@@ -41,6 +50,32 @@ FastAPI backend (Python 3.11)
         |-- football-data.org API  (fixtures, results, standings, H2H)
         |-- The Odds API           (bookmaker odds + Pinnacle sharp reference)
         |-- API-Football           (injury reports)
+```
+
+---
+
+## Repository layout
+
+```
+Sports-Betting-Analysis/
+├── backend/
+│   ├── app/
+│   │   ├── main.py            # FastAPI app + APScheduler
+│   │   ├── api/               # matches, predictions, admin, ai routes
+│   │   ├── services/          # football-data, odds, injuries (API-Football), CLV tracker,
+│   │   │                      # prediction service, evaluator, API cache, scrapers
+│   │   ├── models/            # SQLAlchemy models
+│   │   └── config.py, database.py, utils/
+│   ├── ml/                    # Dixon-Coles, Elo, features, XGBoost models + calibrators,
+│   │                          # blend optimiser, backtest, evaluation report, trainer
+│   ├── ai_layer/              # AI decision layer: packet builder, rules, scoring, recommendations
+│   ├── data/                  # fitted parameters: Dixon-Coles, Elo, blend weights, team aliases
+│   └── Dockerfile
+├── frontend/                  # React + Vite + Tailwind: pages (best bets, CLV, distributions, …), components
+├── .github/workflows/         # daily-refresh.yml, weekly-retrain.yml (both disabled by GitHub for inactivity)
+├── docs/                      # AI decision layer design, model review plan, roadmap, to-do checklist
+├── hosting/HOSTING.md         # Render (backend) + Vercel (frontend) deployment guide
+├── render.yaml, docker-compose.yml
 ```
 
 ---
