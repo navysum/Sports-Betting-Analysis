@@ -4,12 +4,13 @@ A football prediction platform built for the serious bettor. It combines a Dixon
 
 Built with Neil, from April to June 2026.
 
-**Status (23 Sep 2026): the frontend is live, but the model data is stale.** The
-dashboard is up at https://sports-betting-analysis-two.vercel.app, with the
-backend on Render. GitHub **disabled both scheduled workflows for inactivity**:
-*Daily Data Cache Refresh + CLV Snapshot* last ran on 6 Aug 2026, and *Weekly
-Model Retrain* on 9 Aug 2026. Until they are re-enabled under **Actions**, cached
-data and model parameters are not refreshed. The last code change was on 6 Jun 2026.
+**Status (23 Sep 2026): inactive. The site is up but the data is frozen.** The paid
+data-API subscription the project relied on has ended, so no new fixtures, odds or
+predictions come in. The dashboard at https://sports-betting-analysis-two.vercel.app
+shows the last data it had. The scheduled workflows (*Daily Data Cache Refresh +
+CLV Snapshot*, last run 6 Aug 2026; *Weekly Model Retrain*, 9 Aug 2026) were
+disabled by GitHub for inactivity. Leave them off unless a data subscription is
+restarted. The last code change was on 6 Jun 2026.
 
 ---
 
